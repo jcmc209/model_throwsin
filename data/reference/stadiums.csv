@@ -1,0 +1,47 @@
+﻿stadium_name,club,whoscored_id,pitch_length_m,pitch_width_m,capacity,city,latitude,longitude,calendar_name
+"Carlos Belmonte","Albacete",,105,68,17524,"Albacete",38.9810821,-1.852144,
+"Mendizorroza","Alavés",60,105,67,19840,"Vitoria-Gasteiz",42.8372866,-2.6869483,"Deportivo Alavés"
+"Santo Domingo","Alcorcón",,105,68,5500,"Alcorcón",40.3441502,-3.8250041,
+"Power Horse Stadium","Almería",1799,105,68,15000,"Almería",36.840067,-2.4354672,"Almería"
+"San Mamés","Athletic Club",53,105,68,53332,"Bilbao",43.264204,-2.9493915,"Athletic Club"
+"Riyadh Air Metropolitano","Atlético de Madrid",63,105,68,67829,"Madrid",40.436053,-3.5997153,"Atlético Madrid"
+"Camp Nou","FC Barcelona",65,105,70,98787,"Barcelona",41.3807783,2.1156486,"Barcelona"
+"El Plantío","Burgos CF",,105,70,12642,"Burgos",42.3842983,-3.9705285,
+"Nuevo Mirandilla","Cádiz CF",1354,104,65,20724,"Cádiz",36.5026039,-6.2730167,"Cádiz"
+"Balaídos","RC Celta",62,105,69,29000,"Vigo",42.2114076,-8.7440784,"Celta Vigo"
+"Castalia","CD Castellón",,102,70,15500,"Castellón de la Plana",39.9809251,-0.0484662,
+"Nuevo Arcángel","Córdoba CF",,105,70,21822,"Córdoba",37.8721206,-4.7635163,
+"Ipurua","SD Eibar",,103,65,6256,"Éibar",43.1827531,-2.4764693,
+"Martínez Valero","Elche CF",833,108,70,36017,"Elche",38.2670445,-0.6633051,"Elche"
+"Coliseum Alfonso Pérez","Getafe CF",819,105,70,17000,"Getafe",40.3257247,-3.7149326,"Getafe"
+"Montilivi","Girona FC",2783,105,68,9286,"Girona",41.9669314,2.8265099,"Girona FC"
+"Nou Estadi","Nàstic de Tarragona",,103,67,14591,"Tarragona",41.127007,1.2736358,
+"Los Cármenes","Granada CF",925,105,69,22500,"Granada",37.2205065,-3.6970144,"Granada"
+"Rico Pérez","Hércules CF",,105,68,29500,"Alicante",38.3573459,-0.4925974,
+"El Alcoraz","SD Huesca",,105,68,6500,"Huesca",42.131841,-0.4241458,
+"Gran Canaria","UD Las Palmas",838,105,68,32392,"Las Palmas de Gran Canaria",28.1002336,-15.4567247,"Las Palmas"
+"Butarque","CD Leganés",825,105,70,10958,"Leganés",40.3567941,-3.737978,"Leganés"
+"Ciutat de Valencia","Levante UD",832,107,67,25676,"Valencia",39.4740708,-0.3759242,"Levante UD"
+"Ángel Carro","CD Lugo",,105,68,10000,"Lugo",43.0033423,-7.5709841,
+"La Rosaleda","Málaga CF",,105,68,28963,"Málaga",36.7349435,-4.4265346,
+"Son Moix","RCD Mallorca",51,105,68,23142,"Palma",39.589935,2.6301158,"Mallorca"
+"Anduva","CD Mirandés",,105,69,6500,"Miranda de Ebro",42.6796782,-2.9401169,
+"Los Pajaritos","CD Numancia",,103,70,9025,"Soria",41.7579663,-2.4703572,
+"El Sadar","CA Osasuna",131,105,67,19800,"Pamplona",42.7966625,-1.6371311,"Osasuna"
+"El Sardinero","Racing de Santander",,105,68,22222,"Santander",43.4762607,-3.7939533,
+"Estadio de Vallecas","Rayo Vallecano",64,100,65,14708,"Madrid",40.3917566,-3.6587366,"Rayo Vallecano"
+"Cerro Espino","Rayo Majadahonda",,106,70,6000,"Majadahonda",40.4575627,-3.8602862,
+"RCDE Stadium","RCD Espanyol",70,105,68,40500,"Cornellà de Llobregat",41.3478567,2.0764584,"Espanyol"
+"Riazor","RC Deportivo",,105,68,34500,"A Coruña",43.3686669,-8.4144922,
+"Benito Villamarín","Real Betis",54,107,68,51700,"Sevilla",37.3564503,-5.9809176,"Real Betis"
+"Santiago Bernabéu","Real Madrid",52,105,68,80000,"Madrid",40.4523667,-3.6907254,"Real Madrid"
+"Nueva Condomina","Real Murcia",,105,67,31179,"Murcia",38.0422241,-1.1447324,
+"Carlos Tartiere","Real Oviedo",61,105,68,30000,"Oviedo",43.3608716,-5.8703316,"Real Oviedo"
+"Reale Arena","Real Sociedad",68,105,68,32000,"San Sebastián",43.3013899,-1.9735689,"Real Sociedad"
+"El Molinón","Sporting de Gijón",,105,68,30000,"Gijón",43.5351002,-5.6363722,
+"Ramón Sánchez-Pizjuán","Sevilla FC",67,105,70,45500,"Sevilla",37.3846337,-5.9711558,"Sevilla"
+"Heliodoro Rodríguez López","CD Tenerife",,107,70,24000,"Santa Cruz de Tenerife",28.4632428,-16.260548,
+"La Condomina","UCAM Murcia",,105,65,17500,"Murcia",37.6683741,-1.6007028,
+"Mestalla","Valencia CF",55,105,68,52600,"Valencia",39.4745279,-0.3581566,"Valencia"
+"José Zorrilla","Real Valladolid",58,105,68,26512,"Valladolid",41.6445801,-4.7612576,"Real Valladolid"
+"Estadio de la Cerámica","Villarreal CF",839,105,68,24500,"Vila-real",39.9442084,-0.1034046,"Villarreal"
