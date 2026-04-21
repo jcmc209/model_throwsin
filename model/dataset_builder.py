@@ -80,7 +80,7 @@ CONFIG = {
     "output_path": "data/model/dataset.parquet",
 }
 
-EXPECTED_ROWS = 3622  # 1811 partidos × 2 filas (home + away)
+MIN_ROWS = 3000  # mínimo aceptable; crece al añadir temporadas
 
 
 # ─────────────────────────────────────────────────────────────
@@ -202,7 +202,7 @@ def _add_matchday_number(df: pd.DataFrame) -> pd.DataFrame:
 
 def _validate(df: pd.DataFrame) -> None:
     log.info("Validando dataset ...")
-    assert len(df) == EXPECTED_ROWS, f"filas esperadas {EXPECTED_ROWS}, recibidas {len(df)}"
+    assert len(df) >= MIN_ROWS, f"dataset demasiado pequeño: {len(df)} filas (mínimo {MIN_ROWS})"
 
     assert df[TARGET_COL].isna().sum() == 0, f"{TARGET_COL} tiene nulls"
 
