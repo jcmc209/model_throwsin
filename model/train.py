@@ -26,6 +26,12 @@ Uso:
   python -m model.train --weights uniform   # solo uniforme
   python -m model.train --weights decay     # solo decay
   python -m model.train --weights both      # ambos (default)
+
+Guardrail (team bias calibration):
+  Cualquier bloque futuro que genere o evalúe `team_bias_calibration_v2.json`
+  DEBE importar desde `model.market_utils` (`load_team_bias`, `apply_team_bias`).
+  No inlinear lógica de carga/aplicación en este archivo — el helper es la
+  fuente única consumida por `model/predict.py`.
 """
 from __future__ import annotations
 
@@ -124,10 +130,13 @@ CONFIG = {
         "2024/2025": 1.0,
     },
     "lgb_params": {
-        "objective": "poisson",
+        "objective": "tweedie",
+        "tweedie_variance_power": 1.2,
         "metric": "mae",
-        # Hiperparámetros optimizados por Optuna (60 trials, 2026-04-21)
-        # trial #51 → mean_val_MAE=3.9300 (baseline=3.9478, Δ=-0.018, p=0.016)
+        # Hiperparámetros optimizados por Optuna (60 trials, 2026-04-21) para Poisson.
+        # Tweedie p=1.2 usa los mismos params (corr=0.9924 con Poisson → óptimos transferibles).
+        # Exploración 2026-04-21: val_MAE Tweedie=3.7941 vs Poisson=3.8061 (Δ=−0.012).
+        # Bootstrap CV (4 folds): Δ=−0.0052, IC95=[−0.0162,+0.0051], p=0.172 (no sig.).
         "learning_rate": 0.049,
         "num_leaves": 4,
         "min_child_samples": 115,

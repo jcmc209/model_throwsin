@@ -46,6 +46,7 @@ from model.features import (
     compute_style_features,
     impute_weather_forecast_gap,
 )
+from model.market_utils import apply_team_bias, load_team_bias
 
 logging.basicConfig(
     level=logging.INFO,
@@ -67,7 +68,8 @@ CONFIG = {
     "calendar_path": "data/reference/liga_calendar_rows.csv",
     "stadiums_path": "data/reference/stadiums.csv",
     "weather_path": "data/reference/weather.parquet",
-    "output_dir": "data/model",
+    "output_dir": "data/model/predictions",
+    "team_bias_path": "data/model/team_bias_calibration_v2.json",
 }
 
 
@@ -324,6 +326,33 @@ def _apply_share_coefs(match_df: pd.DataFrame, coefs: dict) -> np.ndarray:
 
 
 # ─────────────────────────────────────────────────────────────
+# TEAM-BIAS APPLICATION (inference-side)
+# ─────────────────────────────────────────────────────────────
+
+def _apply_and_log_team_bias(
+    lam_raw: np.ndarray,
+    team_ids: np.ndarray,
+    is_home: np.ndarray,
+    bias_table: dict,
+) -> np.ndarray:
+    """Aplica `apply_team_bias` y loggea mean bias por (team_id, is_home)."""
+    lam_cal = apply_team_bias(lam_raw, team_ids, is_home, bias_table)
+    bias_applied = np.asarray(lam_cal) - np.asarray(lam_raw, dtype=float)
+    team_arr = np.asarray(team_ids)
+    home_arr = np.asarray(is_home)
+    keys = list(zip(team_arr.tolist(), home_arr.tolist()))
+    seen: dict[tuple, list[float]] = {}
+    for k, b in zip(keys, bias_applied.tolist()):
+        seen.setdefault(k, []).append(float(b))
+    for (tid, hid), vals in sorted(seen.items()):
+        log.info(
+            "team_bias_applied team_id=%s is_home=%s mean_bias=%.4f n_matches=%d",
+            tid, hid, float(np.mean(vals)), len(vals),
+        )
+    return lam_cal
+
+
+# ─────────────────────────────────────────────────────────────
 # MAIN (per-team)
 # ─────────────────────────────────────────────────────────────
 
@@ -407,26 +436,38 @@ def main(
     X = pred_df[expected_features].astype(float)
 
     preds = model.predict(X)
-    pred_df["prediction"] = preds
 
-    # Reconstruir formato ancho: pred_home / pred_away / total
+    bias_table = load_team_bias(
+        path=CONFIG["team_bias_path"],
+        model_trained_at=artifact.get("trained_at"),
+    )
+    preds_cal = _apply_and_log_team_bias(
+        lam_raw=np.asarray(preds, dtype=float),
+        team_ids=pred_df["team_id"].to_numpy(),
+        is_home=pred_df["is_home"].to_numpy(),
+        bias_table=bias_table,
+    )
+    pred_df["prediction"] = np.asarray(preds_cal, dtype=float)
+
     wide = pred_df.pivot_table(
         index=["match_id", "match_date", "season"],
         columns="is_home",
         values="prediction",
         aggfunc="first",
-    ).rename(columns={0: "pred_throw_ins_away", 1: "pred_throw_ins_home"}).reset_index()
+    ).rename(columns={0: "pred_away_v2", 1: "pred_home_v2"}).reset_index()
 
     names = pred_df.pivot_table(
         index=["match_id"], columns="is_home", values="team_name", aggfunc="first"
     ).rename(columns={0: "away_team", 1: "home_team"}).reset_index()
 
     out = wide.merge(names, on="match_id")
-    out["pred_throw_ins_total"] = out["pred_throw_ins_home"] + out["pred_throw_ins_away"]
+    out["pred_home_v2"] = out["pred_home_v2"].astype("float64")
+    out["pred_away_v2"] = out["pred_away_v2"].astype("float64")
+    out["pred_total_v2"] = (out["pred_home_v2"] + out["pred_away_v2"]).astype("float64")
     out = out[[
         "match_id", "match_date", "season", "home_team", "away_team",
-        "pred_throw_ins_home", "pred_throw_ins_away", "pred_throw_ins_total",
-    ]].sort_values("match_date").reset_index(drop=True)
+        "pred_home_v2", "pred_away_v2", "pred_total_v2",
+    ]].sort_values(["match_date", "match_id"]).reset_index(drop=True)
 
     out_dir = Path(output_path or CONFIG["output_dir"])
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -541,8 +582,31 @@ def main_bivariate(
     pred_total = total_model.predict(X_total)
     pred_share = _apply_share_coefs(match_df, share_coefs)
 
-    pred_home = pred_total * pred_share
-    pred_away = pred_total * (1.0 - pred_share)
+    pred_home_raw = pred_total * pred_share
+    pred_away_raw = pred_total * (1.0 - pred_share)
+
+    bias_table = load_team_bias(
+        path=CONFIG["team_bias_path"],
+        model_trained_at=total_artifact.get("trained_at"),
+    )
+    home_ids = match_df["home_team_id"].to_numpy()
+    away_ids = match_df["away_team_id"].to_numpy()
+    ones = np.ones(len(match_df), dtype=int)
+    zeros = np.zeros(len(match_df), dtype=int)
+
+    team_ids_stack = np.concatenate([home_ids, away_ids])
+    home_flag_stack = np.concatenate([ones, zeros])
+    lam_stack = np.concatenate([np.asarray(pred_home_raw, dtype=float), np.asarray(pred_away_raw, dtype=float)])
+    lam_cal_stack = _apply_and_log_team_bias(
+        lam_raw=lam_stack,
+        team_ids=team_ids_stack,
+        is_home=home_flag_stack,
+        bias_table=bias_table,
+    )
+    n = len(match_df)
+    pred_home_v2 = np.asarray(lam_cal_stack[:n], dtype=float)
+    pred_away_v2 = np.asarray(lam_cal_stack[n:], dtype=float)
+    pred_total_v2 = pred_home_v2 + pred_away_v2
 
     out = pd.DataFrame({
         "match_id": match_df["match_id"].to_numpy(),
@@ -550,10 +614,10 @@ def main_bivariate(
         "season": match_df["season"].to_numpy(),
         "home_team": match_df["home_team_name"].to_numpy(),
         "away_team": match_df["away_team_name"].to_numpy(),
-        "pred_throw_ins_home": pred_home,
-        "pred_throw_ins_away": pred_away,
-        "pred_throw_ins_total": pred_total,
-    }).sort_values("match_date").reset_index(drop=True)
+        "pred_home_v2": pred_home_v2.astype("float64"),
+        "pred_away_v2": pred_away_v2.astype("float64"),
+        "pred_total_v2": pred_total_v2.astype("float64"),
+    }).sort_values(["match_date", "match_id"]).reset_index(drop=True)
 
     out_dir = Path(output_path or CONFIG["output_dir"])
     out_dir.mkdir(parents=True, exist_ok=True)

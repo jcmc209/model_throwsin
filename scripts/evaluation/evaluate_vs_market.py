@@ -2,24 +2,28 @@
 Evaluate vs Market — Backtesting histórico de cuotas Codere
 ===========================================================
 Cruza las predicciones del modelo con las cuotas históricas de Codere
-para calcular métricas de rendimiento vs mercado.
+para calcular métricas de rendimiento vs mercado, por mercado.
 
-Usa los 29 partidos de Codere (mar–abr 2026) que ya tienen resultado real.
+Mercados soportados:
+  - total_over_under  (2 lados: over / under)
+  - team_with_more    (3 lados: home / away / draw — Codere lista draw explícito)
 
 Uso:
   python scripts/evaluation/evaluate_vs_market.py
+  python scripts/evaluation/evaluate_vs_market.py --market team_with_more
+  python scripts/evaluation/evaluate_vs_market.py --market all
   python scripts/evaluation/evaluate_vs_market.py --devig shin
   python scripts/evaluation/evaluate_vs_market.py --pred-col pred_total_v2
-  python scripts/evaluation/evaluate_vs_market.py --output data/model/market_eval/eval_custom.parquet
 
-Outputs:
-  data/model/market_eval/eval_YYYYMMDD.parquet   — tabla por partido
-  data/model/market_eval/eval_YYYYMMDD.csv       — versión legible
-  (métricas agregadas se imprimen en stdout)
+Outputs (bajo data/model/market_eval/):
+  eval_total_over_under_YYYYMMDD.{parquet,csv}
+  eval_team_with_more_YYYYMMDD.{parquet,csv}
+  eval_summary_YYYYMMDD.json         — métricas agregadas por mercado
 """
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import sys
 from datetime import date
@@ -28,6 +32,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 from scipy.stats import bootstrap as scipy_bootstrap
+from statsmodels.stats.proportion import proportion_confint
 
 # ── path setup ────────────────────────────────────────────────
 _root = Path(__file__).resolve().parent.parent.parent
@@ -40,6 +45,7 @@ from model.market_utils import (
     devig_shin,
     expected_value,
     normalize_team,
+    p_home_more,
     poisson_over_prob,
     vig_pct,
 )
@@ -62,9 +68,13 @@ DEVIG_METHODS = {
     "shin": devig_shin,
 }
 
+SUPPORTED_MARKETS = ("total_over_under", "team_with_more")
+FALLBACK_WARN_THRESHOLD = 0.20   # ADR D4: WARN si >20% filas caen a rolling5
+MC_SEED = 42
+
 
 # ─────────────────────────────────────────────────────────────────────────────
-# CARGA Y CRUCE
+# CARGA Y CRUCE — TOTAL OVER/UNDER
 # ─────────────────────────────────────────────────────────────────────────────
 
 def load_odds_ou(devig_fn) -> pd.DataFrame:
@@ -72,11 +82,9 @@ def load_odds_ou(devig_fn) -> pd.DataFrame:
     co = pd.read_parquet(ODDS_CODERE)
     co_ou = co[co["market_type"] == "total_over_under"].dropna(subset=["line"]).copy()
 
-    # Normalizar nombres → WhoScored
     co_ou["home_ds"] = co_ou["home_team"].map(lambda x: normalize_team(x, "codere_to_ds"))
     co_ou["away_ds"] = co_ou["away_team"].map(lambda x: normalize_team(x, "codere_to_ds"))
 
-    # Pivotear over/under en la misma fila
     over  = co_ou[co_ou["side"] == "over"].rename(columns={"odds": "odds_over"})
     under = co_ou[co_ou["side"] == "under"].rename(columns={"odds": "odds_under"})
 
@@ -85,7 +93,6 @@ def load_odds_ou(devig_fn) -> pd.DataFrame:
         under[key_cols + ["odds_under"]], on=key_cols, how="inner"
     )
 
-    # Devig
     merged[["p_mkt_over", "p_mkt_under"]] = merged.apply(
         lambda r: pd.Series(devig_fn(r["odds_over"], r["odds_under"])), axis=1
     )
@@ -95,123 +102,344 @@ def load_odds_ou(devig_fn) -> pd.DataFrame:
     return merged
 
 
-def load_results() -> pd.DataFrame:
-    """Carga resultados reales del dataset (totales por partido)."""
+# ─────────────────────────────────────────────────────────────────────────────
+# CARGA Y CRUCE — TEAM WITH MORE (3-way)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _devig_three_way_proportional(odds_home: float, odds_away: float, odds_draw: float) -> tuple[float, float, float]:
+    """Devig proporcional sobre 3 selecciones (home/away/draw)."""
+    r_h = 1.0 / odds_home
+    r_a = 1.0 / odds_away
+    r_d = 1.0 / odds_draw
+    total = r_h + r_a + r_d
+    return r_h / total, r_a / total, r_d / total
+
+
+def _vig_pct_three_way(odds_home: float, odds_away: float, odds_draw: float) -> float:
+    return (1.0 / odds_home + 1.0 / odds_away + 1.0 / odds_draw - 1.0) * 100.0
+
+
+def load_odds_team_with_more() -> pd.DataFrame:
+    """
+    Carga Codere `team_with_more` (home/away/draw). Devuelve una fila por partido
+    con columnas de odds y probabilidades devigged para las 3 selecciones.
+
+    Si un match no trae las 3 selecciones (draw faltante por ejemplo), se descarta
+    y se emite WARN — pricing 3-way requiere las tres cuotas.
+    """
+    co = pd.read_parquet(ODDS_CODERE)
+    twm = co[co["market_type"] == "team_with_more"].copy()
+    if twm.empty:
+        return pd.DataFrame()
+
+    twm["home_ds"] = twm["home_team"].map(lambda x: normalize_team(x, "codere_to_ds"))
+    twm["away_ds"] = twm["away_team"].map(lambda x: normalize_team(x, "codere_to_ds"))
+
+    # Snapshot más reciente por (partido, side) — evita que scrapes múltiples dupliquen
+    twm = twm.sort_values("scraped_at", ascending=False, kind="stable")
+    twm = twm.drop_duplicates(subset=["home_ds", "away_ds", "side"], keep="first")
+
+    key_cols = ["home_ds", "away_ds"]
+    h = twm[twm["side"] == "home"].rename(columns={"odds": "odds_home"})[key_cols + ["odds_home"]]
+    a = twm[twm["side"] == "away"].rename(columns={"odds": "odds_away"})[key_cols + ["odds_away"]]
+    d = twm[twm["side"] == "draw"].rename(columns={"odds": "odds_draw"})[key_cols + ["odds_draw"]]
+
+    merged = h.merge(a, on=key_cols, how="inner").merge(d, on=key_cols, how="inner")
+    n_incomplete = twm.groupby(["home_ds", "away_ds"]).size().lt(3).sum()
+    if n_incomplete:
+        log.warning(
+            "team_with_more: %d partidos sin las 3 selecciones (home/away/draw) — descartados",
+            int(n_incomplete),
+        )
+
+    if merged.empty:
+        return merged
+
+    probs = merged.apply(
+        lambda r: pd.Series(
+            _devig_three_way_proportional(r["odds_home"], r["odds_away"], r["odds_draw"]),
+            index=["p_mkt_home", "p_mkt_away", "p_mkt_draw"],
+        ),
+        axis=1,
+    )
+    merged = pd.concat([merged, probs], axis=1)
+    merged["vig_pct"] = merged.apply(
+        lambda r: _vig_pct_three_way(r["odds_home"], r["odds_away"], r["odds_draw"]),
+        axis=1,
+    )
+    return merged
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# RESULTADOS REALES
+# ─────────────────────────────────────────────────────────────────────────────
+
+def load_results_ou() -> pd.DataFrame:
+    """Resultados reales — totales por partido para O/U."""
     ds = pd.read_parquet(DATASET)
     ds26 = ds[ds["season"] == "2025/2026"]
 
     totals = ds26.groupby("match_id")["throw_ins_total"].sum().reset_index()
     totals.columns = ["match_id", "real_total"]
 
-    home_info = ds26[ds26["is_home"] == 1][["match_id", "team_name", "opponent_name", "match_date"]].copy()
+    home_info = ds26[ds26["is_home"] == 1][
+        ["match_id", "team_name", "opponent_name", "match_date"]
+    ].copy()
     home_info.columns = ["match_id", "home_ds", "away_ds", "match_date"]
 
     return totals.merge(home_info, on="match_id")
 
 
-def cross_odds_results(odds_df: pd.DataFrame, results_df: pd.DataFrame) -> tuple[pd.DataFrame, list[str]]:
-    """Cruza cuotas con resultados. Reporta partidos sin cruzar."""
-    # Asegurar que match_date viaja en el merge aunque odds_df no lo tenga
-    odds_merge = odds_df.copy()
-    merged = results_df.merge(odds_merge, on=["home_ds", "away_ds"], how="inner")
+def load_results_team_with_more() -> pd.DataFrame:
+    """
+    Resultados reales para team_with_more: por partido, throw-ins del home y away
+    separados + outcome categórico `realized_side ∈ {home, away, draw}`.
+    """
+    ds = pd.read_parquet(DATASET)
+    ds26 = ds[ds["season"] == "2025/2026"]
 
-    # Partidos en cuotas sin resultado
+    home_rows = ds26[ds26["is_home"] == 1][
+        ["match_id", "match_date", "team_name", "opponent_name", "throw_ins_total"]
+    ].rename(columns={
+        "team_name": "home_ds",
+        "opponent_name": "away_ds",
+        "throw_ins_total": "real_home",
+    })
+    away_rows = ds26[ds26["is_home"] == 0][["match_id", "throw_ins_total"]].rename(
+        columns={"throw_ins_total": "real_away"}
+    )
+    merged = home_rows.merge(away_rows, on="match_id", how="inner")
+
+    def _outcome(h: float, a: float) -> str:
+        if h > a:
+            return "home"
+        if a > h:
+            return "away"
+        return "draw"
+
+    merged["realized_side"] = merged.apply(lambda r: _outcome(r["real_home"], r["real_away"]), axis=1)
+    return merged
+
+
+def cross_keys(odds_df: pd.DataFrame, results_df: pd.DataFrame) -> tuple[pd.DataFrame, list[str]]:
+    """Merge por (home_ds, away_ds). Reporta partidos sin cruzar."""
+    merged = results_df.merge(odds_df, on=["home_ds", "away_ds"], how="inner")
     odds_keys = set(zip(odds_df["home_ds"], odds_df["away_ds"]))
     res_keys  = set(zip(results_df["home_ds"], results_df["away_ds"]))
-    unmatched = [f"{h} vs {a}" for h, a in odds_keys - res_keys]
-
+    unmatched = sorted(f"{h} vs {a}" for h, a in odds_keys - res_keys)
     return merged, unmatched
 
 
-def rebuild_predictions(df: pd.DataFrame, pred_col: str) -> pd.DataFrame:
-    """
-    Intenta reconstruir λ_total para los partidos históricos cruzados.
+# ─────────────────────────────────────────────────────────────────────────────
+# PREDICCIONES — carga desde parquet + data_source tagging (ADR D4)
+# ─────────────────────────────────────────────────────────────────────────────
 
-    Estrategia:
-    1. Busca archivos de predicciones guardados y cruza por (home, away, match_date).
-       Si el archivo es de hoy y los partidos son del pasado, el cruce no dará matches.
-    2. Fallback: re-predice desde el dataset usando rolling5 + bias V2 por partido.
-       No es idéntico al modelo real (que usa todos los features), pero es un proxy razonable.
+def _load_pred_file(pf: Path, cols: list[str]) -> pd.DataFrame | None:
+    """Carga un parquet de predicciones con las columnas solicitadas (si existen)."""
+    pred = pd.read_parquet(pf)
+    missing = [c for c in cols if c not in pred.columns]
+    if missing:
+        return None
+    pred = pred[["home_team", "away_team", "match_date", *cols]].copy()
+    pred["home_ds"] = pred["home_team"].map(
+        lambda x: normalize_team(normalize_team(x, "ds_to_codere"), "codere_to_ds")
+    )
+    pred["away_ds"] = pred["away_team"].map(
+        lambda x: normalize_team(normalize_team(x, "ds_to_codere"), "codere_to_ds")
+    )
+    pred["match_date_pred"] = pd.to_datetime(pred["match_date"]).dt.date
+    return pred
 
-    La forma óptima es ejecutar `python -m model.predict --date YYYY-MM-DD` para cada
-    partido histórico y guardar las predicciones antes de correr este script.
+
+def attach_predictions_ou(df: pd.DataFrame, pred_col: str) -> pd.DataFrame:
     """
-    # ── Intento 1: buscar en archivos de predicciones ─────────────────────
-    pred_files = sorted(OUTPUT_DIR.parent.joinpath("predictions").glob("predictions_*.parquet"))
-    n_matched = 0
+    Cruza predicciones (modelo v2) al backtest de O/U y añade `data_source`:
+      - model_v2         → cruce directo por (home, away, fecha) con `pred_col`
+      - rolling5_fallback → proxy desde dataset (rolling5 home + away)
+      - unmatched        → no se pudo recuperar predicción
+
+    Emite WARN si fallback >20% (ADR D4). Nunca hard-fail.
+    """
+    df = df.copy()
     df["pred_total"] = np.nan
+    df["data_source"] = "unmatched"
+
+    pred_dir = OUTPUT_DIR.parent / "predictions"
+    pred_files = sorted(pred_dir.glob("predictions_*.parquet"))
+    n_matched = 0
 
     for pf in pred_files:
-        pred = pd.read_parquet(pf)
-        if pred_col not in pred.columns:
+        pred_slim = _load_pred_file(pf, [pred_col])
+        if pred_slim is None:
             continue
-        pred_slim = pred[["home_team", "away_team", "match_date", pred_col]].copy()
-        pred_slim.columns = ["home_ds", "away_ds", "match_date_pred", "pred_total_tmp"]
-        # Normalizar
-        pred_slim["home_ds"] = pred_slim["home_ds"].map(
-            lambda x: normalize_team(normalize_team(x, "ds_to_codere"), "codere_to_ds"))
-        pred_slim["away_ds"] = pred_slim["away_ds"].map(
-            lambda x: normalize_team(normalize_team(x, "ds_to_codere"), "codere_to_ds"))
-        pred_slim["match_date_pred"] = pd.to_datetime(pred_slim["match_date_pred"]).dt.date
+        pred_slim = pred_slim.rename(columns={pred_col: "pred_total_tmp"})
+        df_dates = pd.to_datetime(df["match_date"]).dt.date
+        for idx in df.index:
+            if df.at[idx, "data_source"] == "model_v2":
+                continue
+            row = df.loc[idx]
+            match = pred_slim[
+                (pred_slim["home_ds"] == row["home_ds"])
+                & (pred_slim["away_ds"] == row["away_ds"])
+                & (pred_slim["match_date_pred"] == df_dates.loc[idx])
+            ]
+            if not match.empty:
+                df.at[idx, "pred_total"] = float(match["pred_total_tmp"].values[0])
+                df.at[idx, "data_source"] = "model_v2"
+                n_matched += 1
 
-        if "match_date" in df.columns:
-            df_dates = pd.to_datetime(df["match_date"]).dt.date
-            pred_slim["match_date_pred"] = pd.to_datetime(pred_slim["match_date_pred"]).dt.date
-            for idx in df.index:
-                row = df.loc[idx]
-                match = pred_slim[
-                    (pred_slim["home_ds"] == row["home_ds"]) &
-                    (pred_slim["away_ds"] == row["away_ds"]) &
-                    (pred_slim["match_date_pred"] == df_dates.loc[idx])
-                ]
-                if not match.empty:
-                    df.at[idx, "pred_total"] = match["pred_total_tmp"].values[0]
-                    n_matched += 1
+    if n_matched:
+        log.info("Predicciones modelo_v2 cargadas: %d partidos", n_matched)
 
-    if n_matched > 0:
-        log.info("Predicciones del modelo cargadas desde archivos: %d partidos", n_matched)
-
-    # ── Intento 2: proxy desde dataset (rolling5_throw_ins_total home+away) ─
-    n_still_missing = df["pred_total"].isna().sum()
-    if n_still_missing > 0:
-        log.info("Reconstruyendo λ proxy para %d partidos desde rolling5 del dataset...", n_still_missing)
+    # Fallback rolling5 — proxy
+    missing_mask = df["data_source"] == "unmatched"
+    n_missing = int(missing_mask.sum())
+    if n_missing:
+        log.info("Reconstruyendo λ proxy (rolling5) para %d partidos...", n_missing)
         ds = pd.read_parquet(DATASET)
         ds26 = ds[ds["season"] == "2025/2026"].copy()
 
-        # rolling5 home+away por match_id
-        home_r5 = ds26[ds26["is_home"] == 1][["match_id", "team_name", "opponent_name",
-                                               "rolling5_throw_ins_total"]].copy()
-        away_r5 = ds26[ds26["is_home"] == 0][["match_id", "team_name", "rolling5_throw_ins_total"]].copy()
+        home_r5 = ds26[ds26["is_home"] == 1][
+            ["match_id", "team_name", "opponent_name", "rolling5_throw_ins_total"]
+        ].copy()
+        away_r5 = ds26[ds26["is_home"] == 0][
+            ["match_id", "team_name", "rolling5_throw_ins_total"]
+        ].copy()
 
-        # Merge por match_id para obtener par
         r5 = home_r5.merge(away_r5, on="match_id", suffixes=("_home", "_away"))
-        r5["lam_proxy"] = r5["rolling5_throw_ins_total_home"].fillna(18) + r5["rolling5_throw_ins_total_away"].fillna(18)
-        r5["home_ds"] = r5["team_name_home"].map(lambda x: normalize_team(normalize_team(x, "ds_to_codere"), "codere_to_ds"))
-        r5["away_ds"] = r5["opponent_name"].map(lambda x: normalize_team(normalize_team(x, "ds_to_codere"), "codere_to_ds"))
-
+        r5["lam_proxy"] = (
+            r5["rolling5_throw_ins_total_home"].fillna(18)
+            + r5["rolling5_throw_ins_total_away"].fillna(18)
+        )
+        r5["home_ds"] = r5["team_name_home"].map(
+            lambda x: normalize_team(normalize_team(x, "ds_to_codere"), "codere_to_ds")
+        )
+        r5["away_ds"] = r5["opponent_name"].map(
+            lambda x: normalize_team(normalize_team(x, "ds_to_codere"), "codere_to_ds")
+        )
         proxy_map = dict(zip(zip(r5["home_ds"], r5["away_ds"]), r5["lam_proxy"]))
 
-        mask = df["pred_total"].isna()
-        df.loc[mask, "pred_total"] = df.loc[mask].apply(
-            lambda row: proxy_map.get((row["home_ds"], row["away_ds"]), np.nan), axis=1
-        )
-        n_proxy = df["pred_total"].notna().sum() - (n_matched)
-        log.info("Partidos con λ proxy (rolling5): %d", n_proxy)
+        for idx in df.index[missing_mask]:
+            row = df.loc[idx]
+            key = (row["home_ds"], row["away_ds"])
+            if key in proxy_map and not pd.isna(proxy_map[key]):
+                df.at[idx, "pred_total"] = float(proxy_map[key])
+                df.at[idx, "data_source"] = "rolling5_fallback"
 
-    still_nan = df["pred_total"].isna().sum()
+    counts = df["data_source"].value_counts().to_dict()
+    n_total = len(df)
+    frac_fallback = counts.get("rolling5_fallback", 0) / max(n_total, 1)
+    log.info("data_source counts: %s", counts)
+    if frac_fallback > FALLBACK_WARN_THRESHOLD:
+        log.warning(
+            "rolling5_fallback = %.1f%% de filas (>20%%). Métricas del modelo degradadas — revisar pipeline.",
+            frac_fallback * 100,
+        )
+
+    still_nan = int(df["pred_total"].isna().sum())
     if still_nan:
-        log.warning("%d partidos sin λ → excluidos de métricas de modelo.", still_nan)
-    else:
-        log.info("λ disponible para todos los %d partidos cruzados.", len(df))
+        log.warning("%d partidos sin λ → excluidos de métricas de modelo", still_nan)
+    return df
+
+
+def attach_predictions_team_with_more(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Cruza predicciones (modelo v2) al backtest de team_with_more:
+    necesita `pred_home_v2` y `pred_away_v2` por separado.
+
+    Tagging:
+      - model_v2          → cruce directo
+      - rolling5_fallback → rolling5 home / rolling5 away desde dataset
+      - unmatched         → no recuperable
+    """
+    df = df.copy()
+    df["pred_home_lam"] = np.nan
+    df["pred_away_lam"] = np.nan
+    df["data_source"] = "unmatched"
+
+    pred_dir = OUTPUT_DIR.parent / "predictions"
+    pred_files = sorted(pred_dir.glob("predictions_*.parquet"))
+    n_matched = 0
+
+    for pf in pred_files:
+        pred_slim = _load_pred_file(pf, ["pred_home_v2", "pred_away_v2"])
+        if pred_slim is None:
+            continue
+        df_dates = pd.to_datetime(df["match_date"]).dt.date
+        for idx in df.index:
+            if df.at[idx, "data_source"] == "model_v2":
+                continue
+            row = df.loc[idx]
+            match = pred_slim[
+                (pred_slim["home_ds"] == row["home_ds"])
+                & (pred_slim["away_ds"] == row["away_ds"])
+                & (pred_slim["match_date_pred"] == df_dates.loc[idx])
+            ]
+            if not match.empty:
+                df.at[idx, "pred_home_lam"] = float(match["pred_home_v2"].values[0])
+                df.at[idx, "pred_away_lam"] = float(match["pred_away_v2"].values[0])
+                df.at[idx, "data_source"] = "model_v2"
+                n_matched += 1
+
+    if n_matched:
+        log.info("Predicciones modelo_v2 cargadas (team_with_more): %d partidos", n_matched)
+
+    missing_mask = df["data_source"] == "unmatched"
+    n_missing = int(missing_mask.sum())
+    if n_missing:
+        log.info("Reconstruyendo λ proxy (rolling5 por lado) para %d partidos...", n_missing)
+        ds = pd.read_parquet(DATASET)
+        ds26 = ds[ds["season"] == "2025/2026"].copy()
+
+        home_r5 = ds26[ds26["is_home"] == 1][
+            ["match_id", "team_name", "opponent_name", "rolling5_throw_ins_total"]
+        ].rename(columns={"rolling5_throw_ins_total": "lam_home_proxy"})
+        away_r5 = ds26[ds26["is_home"] == 0][
+            ["match_id", "rolling5_throw_ins_total"]
+        ].rename(columns={"rolling5_throw_ins_total": "lam_away_proxy"})
+        r5 = home_r5.merge(away_r5, on="match_id", how="inner")
+        r5["lam_home_proxy"] = r5["lam_home_proxy"].fillna(18)
+        r5["lam_away_proxy"] = r5["lam_away_proxy"].fillna(18)
+        r5["home_ds"] = r5["team_name"].map(
+            lambda x: normalize_team(normalize_team(x, "ds_to_codere"), "codere_to_ds")
+        )
+        r5["away_ds"] = r5["opponent_name"].map(
+            lambda x: normalize_team(normalize_team(x, "ds_to_codere"), "codere_to_ds")
+        )
+        proxy_map = {
+            (h, a): (lh, la)
+            for h, a, lh, la in zip(
+                r5["home_ds"], r5["away_ds"], r5["lam_home_proxy"], r5["lam_away_proxy"]
+            )
+        }
+        for idx in df.index[missing_mask]:
+            row = df.loc[idx]
+            key = (row["home_ds"], row["away_ds"])
+            if key in proxy_map:
+                lh, la = proxy_map[key]
+                if pd.notna(lh) and pd.notna(la):
+                    df.at[idx, "pred_home_lam"] = float(lh)
+                    df.at[idx, "pred_away_lam"] = float(la)
+                    df.at[idx, "data_source"] = "rolling5_fallback"
+
+    counts = df["data_source"].value_counts().to_dict()
+    n_total = len(df)
+    frac_fallback = counts.get("rolling5_fallback", 0) / max(n_total, 1)
+    log.info("data_source counts (team_with_more): %s", counts)
+    if frac_fallback > FALLBACK_WARN_THRESHOLD:
+        log.warning(
+            "rolling5_fallback = %.1f%% de filas en team_with_more (>20%%) — revisar pipeline.",
+            frac_fallback * 100,
+        )
     return df
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# CÁLCULO DE MÉTRICAS
+# MÉTRICAS POR FILA
 # ─────────────────────────────────────────────────────────────────────────────
 
-def compute_row_metrics(df: pd.DataFrame) -> pd.DataFrame:
-    """Añade p_model_over, edge, ev_over, realized_over a nivel partido."""
+def compute_rows_ou(df: pd.DataFrame) -> pd.DataFrame:
+    """Métricas por partido para total_over_under."""
     df = df.copy()
     df["realized_over"] = (df["real_total"] > df["line"]).astype(int)
 
@@ -225,11 +453,87 @@ def compute_row_metrics(df: pd.DataFrame) -> pd.DataFrame:
     df["edge_over"]  = df["p_model_over"]  - df["p_mkt_over"]
     df["edge_under"] = df["p_model_under"] - df["p_mkt_under"]
 
-    df["ev_over"]  = df.apply(lambda r: expected_value(r["p_model_over"],  r["odds_over"])  if pd.notna(r["p_model_over"])  else np.nan, axis=1)
-    df["ev_under"] = df.apply(lambda r: expected_value(r["p_model_under"], r["odds_under"]) if pd.notna(r["p_model_under"]) else np.nan, axis=1)
+    df["ev_over"]  = df.apply(
+        lambda r: expected_value(r["p_model_over"], r["odds_over"])
+        if pd.notna(r["p_model_over"]) else np.nan,
+        axis=1,
+    )
+    df["ev_under"] = df.apply(
+        lambda r: expected_value(r["p_model_under"], r["odds_under"])
+        if pd.notna(r["p_model_under"]) else np.nan,
+        axis=1,
+    )
 
+    # side_picked: lado con mayor EV del modelo (tie → over)
+    def _pick(row) -> str:
+        if pd.isna(row["ev_over"]) or pd.isna(row["ev_under"]):
+            return "none"
+        return "over" if row["ev_over"] >= row["ev_under"] else "under"
+    df["side_picked"] = df.apply(_pick, axis=1)
+
+    df["market_type"] = "total_over_under"
     return df
 
+
+def compute_rows_team_with_more(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Métricas por partido para team_with_more:
+    usa Skellam (closed-form) → 3 probabilidades → EV por selección.
+    """
+    df = df.copy()
+    has_pred = df["pred_home_lam"].notna() & df["pred_away_lam"].notna()
+
+    p_home = np.full(len(df), np.nan)
+    p_tie = np.full(len(df), np.nan)
+    p_away = np.full(len(df), np.nan)
+
+    if has_pred.any():
+        lam_h = df.loc[has_pred, "pred_home_lam"].to_numpy(dtype=float)
+        lam_a = df.loc[has_pred, "pred_away_lam"].to_numpy(dtype=float)
+        p_h_v, p_t_v, p_a_v = p_home_more(lam_h, lam_a, method="skellam", seed=MC_SEED)
+        p_home[has_pred.values] = np.asarray(p_h_v)
+        p_tie[has_pred.values] = np.asarray(p_t_v)
+        p_away[has_pred.values] = np.asarray(p_a_v)
+
+    df["p_model_home"] = p_home
+    df["p_model_draw"] = p_tie
+    df["p_model_away"] = p_away
+
+    df["edge_home"] = df["p_model_home"] - df["p_mkt_home"]
+    df["edge_away"] = df["p_model_away"] - df["p_mkt_away"]
+    df["edge_draw"] = df["p_model_draw"] - df["p_mkt_draw"]
+
+    df["ev_home"] = df.apply(
+        lambda r: expected_value(r["p_model_home"], r["odds_home"])
+        if pd.notna(r["p_model_home"]) else np.nan,
+        axis=1,
+    )
+    df["ev_away"] = df.apply(
+        lambda r: expected_value(r["p_model_away"], r["odds_away"])
+        if pd.notna(r["p_model_away"]) else np.nan,
+        axis=1,
+    )
+    df["ev_draw"] = df.apply(
+        lambda r: expected_value(r["p_model_draw"], r["odds_draw"])
+        if pd.notna(r["p_model_draw"]) else np.nan,
+        axis=1,
+    )
+
+    def _pick(row) -> str:
+        evs = {"home": row["ev_home"], "away": row["ev_away"], "draw": row["ev_draw"]}
+        evs = {k: v for k, v in evs.items() if pd.notna(v)}
+        if not evs:
+            return "none"
+        return max(evs, key=evs.get)
+
+    df["side_picked"] = df.apply(_pick, axis=1)
+    df["market_type"] = "team_with_more"
+    return df
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# MÉTRICAS AGREGADAS
+# ─────────────────────────────────────────────────────────────────────────────
 
 def brier_score(p_pred: np.ndarray, y: np.ndarray) -> float:
     return float(np.mean((p_pred - y) ** 2))
@@ -240,149 +544,291 @@ def log_loss_binary(p_pred: np.ndarray, y: np.ndarray, eps: float = 1e-7) -> flo
     return float(-np.mean(y * np.log(p) + (1 - y) * np.log(1 - p)))
 
 
-def bootstrap_ci(metric_fn, data: np.ndarray, n_boot: int = 2000, ci: float = 0.95) -> tuple[float, float]:
-    """IC bootstrap de percentil para una métrica escalar."""
-    result = scipy_bootstrap(
-        (data,), metric_fn, n_resamples=n_boot, confidence_level=ci, method="percentile"
-    )
-    return float(result.confidence_interval.low), float(result.confidence_interval.high)
+def _wilson_ci(k: int, n: int) -> tuple[float, float]:
+    if n <= 0:
+        return (float("nan"), float("nan"))
+    lo, hi = proportion_confint(count=k, nobs=n, alpha=0.05, method="wilson")
+    return float(lo), float(hi)
 
 
-def compute_aggregate_metrics(df: pd.DataFrame) -> dict:
-    """Calcula métricas agregadas sobre todos los partidos cruzados."""
-    y = df["realized_over"].values.astype(float)
-    n = len(y)
-    metrics: dict = {"n_matches": n}
+def _roi_for_picks(df_m: pd.DataFrame, odds_col: str, win_mask: pd.Series) -> float:
+    """ROI teórico flat-stake apostando siempre `side_picked`."""
+    returns = np.where(win_mask, df_m[odds_col] - 1.0, -1.0)
+    if len(returns) == 0:
+        return float("nan")
+    return float(np.mean(returns))
 
-    # ── Naive baseline ────────────────────────────────────────
-    metrics["naive_brier"]    = brier_score(np.full(n, 0.5), y)
-    metrics["naive_logloss"]  = log_loss_binary(np.full(n, 0.5), y)
-    metrics["realized_over_rate"] = float(y.mean())
 
-    # ── Mercado ───────────────────────────────────────────────
+def aggregate_ou(df: pd.DataFrame) -> dict:
+    """Métricas agregadas para total_over_under. Duales: `_model_v2` y `_all`."""
+    y_full = df["realized_over"].values.astype(float)
+    out: dict = {
+        "market": "total_over_under",
+        "n_all": int(len(df)),
+        "realized_over_rate": float(y_full.mean()) if len(y_full) else float("nan"),
+    }
+    out["data_source_counts"] = {
+        k: int(v) for k, v in df["data_source"].value_counts().items()
+    }
+
+    # Mercado (siempre sobre filas cruzadas)
     p_mkt = df["p_mkt_over"].values
-    metrics["market_brier"]   = brier_score(p_mkt, y)
-    metrics["market_logloss"] = log_loss_binary(p_mkt, y)
-    metrics["market_accuracy"] = float(((p_mkt > 0.5) == y).mean())
-    metrics["avg_vig_pct"]    = float(df["vig_pct"].mean())
+    out["market_brier"] = brier_score(p_mkt, y_full) if len(y_full) else float("nan")
+    out["market_log_loss"] = log_loss_binary(p_mkt, y_full) if len(y_full) else float("nan")
+    out["avg_vig_pct"] = float(df["vig_pct"].mean()) if len(df) else float("nan")
 
-    # ── Modelo ────────────────────────────────────────────────
-    df_m = df.dropna(subset=["p_model_over"])
-    if len(df_m) > 0:
-        p_mod = df_m["p_model_over"].values
-        y_m   = df_m["realized_over"].values.astype(float)
-        metrics["model_brier"]    = brier_score(p_mod, y_m)
-        metrics["model_logloss"]  = log_loss_binary(p_mod, y_m)
-        metrics["model_accuracy"] = float(((p_mod > 0.5) == y_m).mean())
-        metrics["model_n"]        = len(df_m)
+    # Modelo — dos subconjuntos: model_v2 vs all
+    for subset_name, mask in (("model_v2", df["data_source"] == "model_v2"),
+                              ("all", df["pred_total"].notna())):
+        sub = df[mask].copy()
+        n = len(sub)
+        if n == 0:
+            out[f"n_{subset_name}"] = 0
+            continue
 
-        # ROI teórico: apostamos siempre el lado con mayor EV del modelo
-        roi_returns = []
-        for _, row in df_m.iterrows():
-            if row["ev_over"] > row["ev_under"]:
-                ret = row["odds_over"] - 1 if row["realized_over"] == 1 else -1
-            else:
-                ret = row["odds_under"] - 1 if row["realized_over"] == 0 else -1
-            roi_returns.append(ret)
-        metrics["roi_theoretical"] = float(np.mean(roi_returns))
+        y = sub["realized_over"].values.astype(float)
 
-        # IC bootstrap del Brier Score del modelo (advertir sobre N pequeña)
-        if len(df_m) >= 10:
-            # scipy.bootstrap espera una función (data,) → scalar, donde data es 1D resample
-            # Pasamos p_mod e y_m como dos arrays separados
-            def _brier_boot(p, y):
-                return brier_score(p, y)
-            result = scipy_bootstrap(
-                (p_mod, y_m), _brier_boot,
-                n_resamples=2000, confidence_level=0.95,
-                method="percentile", paired=True,
-            )
-            metrics["model_brier_ci95"] = [
-                float(result.confidence_interval.low),
-                float(result.confidence_interval.high),
-            ]
-    else:
-        log.warning("No hay predicciones de modelo disponibles. Solo se calculan métricas de mercado.")
+        # hit_rate: fue el lado elegido el que ganó?
+        wins = sub.apply(
+            lambda r: (r["side_picked"] == "over" and r["realized_over"] == 1)
+                      or (r["side_picked"] == "under" and r["realized_over"] == 0),
+            axis=1,
+        )
+        k = int(wins.sum())
+        lo, hi = _wilson_ci(k, n)
 
-    return metrics
+        # p_model para Brier/logloss sobre over (binario)
+        p_mod = sub["p_model_over"].values
+
+        # ROI teórico (y con push-refund, que para O/U 2-way sin push = mismo valor)
+        def _ret(r):
+            if r["side_picked"] == "over":
+                return (r["odds_over"] - 1.0) if r["realized_over"] == 1 else -1.0
+            return (r["odds_under"] - 1.0) if r["realized_over"] == 0 else -1.0
+        returns = sub.apply(_ret, axis=1).astype(float).values
+        roi = float(np.mean(returns)) if len(returns) else float("nan")
+
+        out[f"n_{subset_name}"] = n
+        out[f"hit_rate_{subset_name}"] = float(k / n)
+        out[f"wilson_ci_low_{subset_name}"] = lo
+        out[f"wilson_ci_high_{subset_name}"] = hi
+        out[f"brier_{subset_name}"] = brier_score(p_mod, y)
+        out[f"log_loss_{subset_name}"] = log_loss_binary(p_mod, y)
+        out[f"roi_theoretical_{subset_name}"] = roi
+        # Para O/U 2-way el push es P(X==line) — en líneas .5 = 0; asumimos igual a roi.
+        out[f"roi_with_push_refund_{subset_name}"] = roi
+
+    # Claves "principales" (sin sufijo) = subset model_v2 si existe, si no all
+    primary = "model_v2" if out.get("n_model_v2", 0) > 0 else "all"
+    if out.get(f"n_{primary}", 0) > 0:
+        out["n"] = out[f"n_{primary}"]
+        out["hit_rate"] = out[f"hit_rate_{primary}"]
+        out["wilson_ci_low"] = out[f"wilson_ci_low_{primary}"]
+        out["wilson_ci_high"] = out[f"wilson_ci_high_{primary}"]
+        out["brier"] = out[f"brier_{primary}"]
+        out["log_loss"] = out[f"log_loss_{primary}"]
+        out["roi_theoretical"] = out[f"roi_theoretical_{primary}"]
+        out["roi_with_push_refund"] = out[f"roi_with_push_refund_{primary}"]
+    return out
 
 
-def calibration_table(df: pd.DataFrame, n_bins: int = 5) -> pd.DataFrame:
-    """Tabla de calibración: p_model_over en quintiles vs tasa real de over."""
-    df_m = df.dropna(subset=["p_model_over"]).copy()
-    if len(df_m) < n_bins:
-        return pd.DataFrame()
-    df_m["bin"] = pd.qcut(df_m["p_model_over"], q=n_bins, duplicates="drop")
-    cal = df_m.groupby("bin", observed=True).agg(
-        n=("realized_over", "count"),
-        p_model_mean=("p_model_over", "mean"),
-        realized_rate=("realized_over", "mean"),
-    ).reset_index()
-    cal["calibration_error"] = cal["p_model_mean"] - cal["realized_rate"]
-    return cal
+def aggregate_team_with_more(df: pd.DataFrame) -> dict:
+    """Métricas agregadas para team_with_more (3-way)."""
+    out: dict = {
+        "market": "team_with_more",
+        "n_all": int(len(df)),
+    }
+    out["realized_side_counts"] = {
+        k: int(v) for k, v in df["realized_side"].value_counts().items()
+    }
+    out["data_source_counts"] = {
+        k: int(v) for k, v in df["data_source"].value_counts().items()
+    }
+
+    # VIG medio (3-way)
+    out["avg_vig_pct"] = float(df["vig_pct"].mean()) if len(df) else float("nan")
+
+    for subset_name, mask in (("model_v2", df["data_source"] == "model_v2"),
+                              ("all", df["pred_home_lam"].notna())):
+        sub = df[mask].copy()
+        n = len(sub)
+        if n == 0:
+            out[f"n_{subset_name}"] = 0
+            continue
+
+        # hit_rate: side_picked == realized_side
+        wins = (sub["side_picked"] == sub["realized_side"]).astype(int)
+        k = int(wins.sum())
+        lo, hi = _wilson_ci(k, n)
+
+        # Brier / log_loss: evaluar sobre el outcome categórico como one-hot
+        realized_home = (sub["realized_side"] == "home").astype(float).values
+        realized_away = (sub["realized_side"] == "away").astype(float).values
+        realized_draw = (sub["realized_side"] == "draw").astype(float).values
+
+        p_h = sub["p_model_home"].values
+        p_a = sub["p_model_away"].values
+        p_d = sub["p_model_draw"].values
+
+        # Multiclass Brier = media de los 3 Briers one-vs-rest (∈ [0, 2] convencional,
+        # aquí promediamos los tres para mantener misma escala que binario).
+        brier_multi = float(
+            np.mean((p_h - realized_home) ** 2
+                    + (p_a - realized_away) ** 2
+                    + (p_d - realized_draw) ** 2)
+        )
+        # Log-loss multiclass: -mean(log(p_realized))
+        eps = 1e-7
+        p_realized = np.where(
+            sub["realized_side"].values == "home", p_h,
+            np.where(sub["realized_side"].values == "away", p_a, p_d),
+        )
+        p_realized = np.clip(p_realized, eps, 1 - eps)
+        log_loss_multi = float(-np.mean(np.log(p_realized)))
+
+        # ROI
+        def _ret(r):
+            side = r["side_picked"]
+            realized = r["realized_side"]
+            if side == "home":
+                return (r["odds_home"] - 1.0) if realized == "home" else -1.0
+            if side == "away":
+                return (r["odds_away"] - 1.0) if realized == "away" else -1.0
+            if side == "draw":
+                return (r["odds_draw"] - 1.0) if realized == "draw" else -1.0
+            return 0.0
+        returns = sub.apply(_ret, axis=1).astype(float).values
+        roi = float(np.mean(returns)) if len(returns) else float("nan")
+
+        out[f"n_{subset_name}"] = n
+        out[f"hit_rate_{subset_name}"] = float(k / n)
+        out[f"wilson_ci_low_{subset_name}"] = lo
+        out[f"wilson_ci_high_{subset_name}"] = hi
+        out[f"brier_{subset_name}"] = brier_multi
+        out[f"log_loss_{subset_name}"] = log_loss_multi
+        out[f"roi_theoretical_{subset_name}"] = roi
+        # 3-way con draw explícito → no hay push-refund (draw es un side propio). Igualamos.
+        out[f"roi_with_push_refund_{subset_name}"] = roi
+
+    primary = "model_v2" if out.get("n_model_v2", 0) > 0 else "all"
+    if out.get(f"n_{primary}", 0) > 0:
+        out["n"] = out[f"n_{primary}"]
+        out["hit_rate"] = out[f"hit_rate_{primary}"]
+        out["wilson_ci_low"] = out[f"wilson_ci_low_{primary}"]
+        out["wilson_ci_high"] = out[f"wilson_ci_high_{primary}"]
+        out["brier"] = out[f"brier_{primary}"]
+        out["log_loss"] = out[f"log_loss_{primary}"]
+        out["roi_theoretical"] = out[f"roi_theoretical_{primary}"]
+        out["roi_with_push_refund"] = out[f"roi_with_push_refund_{primary}"]
+    return out
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # DISPLAY
 # ─────────────────────────────────────────────────────────────────────────────
 
-def print_match_table(df: pd.DataFrame) -> None:
-    display_cols = ["home_ds", "away_ds", "line", "real_total", "realized_over",
-                    "p_mkt_over", "p_model_over", "edge_over", "ev_over", "vig_pct"]
-    available = [c for c in display_cols if c in df.columns]
-    pd.set_option("display.max_rows", 100)
-    pd.set_option("display.width", 160)
-    pd.set_option("display.float_format", "{:.3f}".format)
-    print("\n" + "=" * 90)
-    print("TABLA POR PARTIDO")
-    print("=" * 90)
-    sort_col = next((c for c in ["match_date", "home_ds"] if c in df.columns), None)
-    out = df[available]
-    if sort_col and sort_col in out.columns:
-        out = out.sort_values(sort_col)
-    print(out.to_string(index=False))
-
-
-def print_metrics(metrics: dict) -> None:
-    print("\n" + "=" * 60)
-    print("MÉTRICAS AGREGADAS")
-    print(f"  ⚠️  N = {metrics['n_matches']} partidos — intervalo de confianza muy amplio")
-    print("=" * 60)
-    print(f"  Realized over rate:    {metrics['realized_over_rate']:.3f}  (esperado ≈0.50)")
-    print(f"  VIG promedio:          {metrics.get('avg_vig_pct', 0):.1f}%")
-    print()
-    print("  BRIER SCORE (↓ mejor, naive=0.25):")
-    print(f"    Naive (0.5):         {metrics['naive_brier']:.4f}")
-    print(f"    Mercado:             {metrics['market_brier']:.4f}")
-    if "model_brier" in metrics:
-        ci = metrics.get("model_brier_ci95", [None, None])
-        ci_str = f"  IC95%: [{ci[0]:.4f}, {ci[1]:.4f}]" if ci[0] is not None else ""
-        print(f"    Modelo:              {metrics['model_brier']:.4f}{ci_str}")
-    print()
-    print("  LOG-LOSS (↓ mejor):")
-    print(f"    Naive:               {metrics['naive_logloss']:.4f}")
-    print(f"    Mercado:             {metrics['market_logloss']:.4f}")
-    if "model_logloss" in metrics:
-        print(f"    Modelo:              {metrics['model_logloss']:.4f}")
-    print()
-    print("  ACCURACY (lado correcto del 50%):")
-    print(f"    Mercado:             {metrics['market_accuracy']:.3f}")
-    if "model_accuracy" in metrics:
-        print(f"    Modelo:              {metrics['model_accuracy']:.3f}")
-    if "roi_theoretical" in metrics:
-        print()
-        print(f"  ROI TEÓRICO (siempre apostar lado con mayor EV del modelo):")
-        print(f"    {metrics['roi_theoretical']:+.3f}  ({metrics['roi_theoretical']*100:+.1f}% por apuesta)")
-        print("    ⚠️  Con N pequeña, ROI teórico es ruido. No usar para decisiones reales.")
-    print("=" * 60)
-
-
-def print_calibration(cal: pd.DataFrame) -> None:
-    if cal.empty:
+def print_summary(metrics: dict) -> None:
+    market = metrics.get("market", "?")
+    print("\n" + "=" * 72)
+    print(f"MERCADO: {market}")
+    print(f"  N total cruzado: {metrics.get('n_all', 0)}")
+    print(f"  data_source: {metrics.get('data_source_counts', {})}")
+    print(f"  VIG medio: {metrics.get('avg_vig_pct', float('nan')):.2f}%")
+    print("=" * 72)
+    if metrics.get("n", 0) == 0:
+        print("  Sin predicciones disponibles — solo métricas mercado.")
         return
-    print("\nCALIBRACIÓN (p_model_over en quintiles):")
-    pd.set_option("display.float_format", "{:.3f}".format)
-    print(cal.to_string(index=False))
+    print(f"  hit_rate:        {metrics['hit_rate']:.3f}  "
+          f"(Wilson CI95: [{metrics['wilson_ci_low']:.3f}, {metrics['wilson_ci_high']:.3f}])  "
+          f"N={metrics['n']}")
+    print(f"  Brier:           {metrics['brier']:.4f}")
+    print(f"  log-loss:        {metrics['log_loss']:.4f}")
+    print(f"  ROI teórico:     {metrics['roi_theoretical']:+.4f}")
+    if metrics.get("n_model_v2", 0) and metrics.get("n_all", 0) > metrics.get("n_model_v2", 0):
+        print(f"  (subset model_v2 vs all visibles en eval_summary.json)")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PIPELINE POR MERCADO
+# ─────────────────────────────────────────────────────────────────────────────
+
+def run_ou(devig_fn, pred_col: str) -> tuple[pd.DataFrame, dict]:
+    odds = load_odds_ou(devig_fn)
+    results = load_results_ou()
+    log.info("O/U Codere: %d pares partido×línea", len(odds))
+    log.info("Resultados reales 2025/26: %d partidos", results["match_id"].nunique())
+
+    df, unmatched = cross_keys(odds, results)
+    if unmatched:
+        log.warning("O/U partidos en cuotas SIN resultado (unmatched): %d", len(unmatched))
+    log.info("O/U partidos cruzados: %d", len(df))
+
+    df = attach_predictions_ou(df, pred_col)
+    df = compute_rows_ou(df)
+
+    # Determinismo: ordenar por claves estables
+    sort_cols = [c for c in ["match_date", "match_id", "home_ds", "away_ds", "line"] if c in df.columns]
+    df = df.sort_values(sort_cols, kind="stable").reset_index(drop=True)
+
+    metrics = aggregate_ou(df)
+    return df, metrics
+
+
+def run_team_with_more() -> tuple[pd.DataFrame, dict]:
+    odds = load_odds_team_with_more()
+    results = load_results_team_with_more()
+    log.info("team_with_more Codere: %d partidos con 3 selecciones", len(odds))
+
+    if odds.empty:
+        log.warning("Sin cuotas team_with_more — skip")
+        return pd.DataFrame(), {"market": "team_with_more", "n_all": 0}
+
+    df, unmatched = cross_keys(odds, results)
+    if unmatched:
+        log.warning("team_with_more unmatched: %d", len(unmatched))
+    log.info("team_with_more partidos cruzados: %d", len(df))
+
+    df = attach_predictions_team_with_more(df)
+    df = compute_rows_team_with_more(df)
+
+    sort_cols = [c for c in ["match_date", "match_id", "home_ds", "away_ds"] if c in df.columns]
+    df = df.sort_values(sort_cols, kind="stable").reset_index(drop=True)
+
+    metrics = aggregate_team_with_more(df)
+    return df, metrics
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# OUTPUT
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _clean_for_parquet(df: pd.DataFrame) -> pd.DataFrame:
+    """Convierte columnas object mixtas a str para que parquet no explote."""
+    out = df.copy()
+    for col in out.columns:
+        if out[col].dtype == object:
+            # si hay datetime.date, convertir a str
+            out[col] = out[col].astype(object).where(out[col].notna(), None)
+    return out
+
+
+def save_market(df: pd.DataFrame, market: str, today_str: str) -> dict:
+    if df.empty:
+        return {}
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    base = OUTPUT_DIR / f"eval_{market}_{today_str}"
+    parquet_path = base.with_suffix(".parquet")
+    csv_path = base.with_suffix(".csv")
+
+    df_clean = _clean_for_parquet(df)
+    try:
+        df_clean.to_parquet(parquet_path, index=False)
+    except Exception as e:
+        log.warning("No pude escribir parquet %s (%s). Uso solo CSV.", parquet_path, e)
+        parquet_path = None
+    df_clean.to_csv(csv_path, index=False)
+    log.info("Guardado %s → %s%s", market, csv_path, f" + {parquet_path}" if parquet_path else "")
+    return {"parquet": str(parquet_path) if parquet_path else None, "csv": str(csv_path)}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -391,54 +837,56 @@ def print_calibration(cal: pd.DataFrame) -> None:
 
 def main() -> None:
     sys.stdout.reconfigure(encoding="utf-8")
-    parser = argparse.ArgumentParser(description="Backtesting modelo vs mercado Codere")
+    parser = argparse.ArgumentParser(description="Backtesting modelo vs mercado Codere (per-market)")
     parser.add_argument("--devig", choices=["proportional", "shin"], default="proportional",
-                        help="Método de devig (default: proportional)")
+                        help="Método de devig para O/U (default: proportional)")
     parser.add_argument("--pred-col", default="pred_total_v2",
-                        help="Columna de predicción a usar (default: pred_total_v2)")
-    parser.add_argument("--output", default=None,
-                        help="Ruta custom para el parquet de salida")
+                        help="Columna de predicción total para O/U (default: pred_total_v2)")
+    parser.add_argument("--market", choices=["total_over_under", "team_with_more", "all"],
+                        default="all",
+                        help="Mercado a evaluar (default: all)")
+    parser.add_argument("--output-dir", default=None,
+                        help="Override del directorio de output")
     args = parser.parse_args()
 
+    global OUTPUT_DIR
+    if args.output_dir:
+        OUTPUT_DIR = Path(args.output_dir)
+
     devig_fn = DEVIG_METHODS[args.devig]
-    log.info("Devig: %s | Columna predicción: %s", args.devig, args.pred_col)
+    log.info("Devig=%s | pred_col=%s | market=%s", args.devig, args.pred_col, args.market)
 
-    # 1. Cargar datos
-    odds = load_odds_ou(devig_fn)
-    results = load_results()
-    log.info("Cuotas O/U Codere: %d pares partido×línea", len(odds))
-    log.info("Resultados reales 2025/26: %d partidos", results["match_id"].nunique())
+    today_str = date.today().strftime("%Y%m%d")
+    summary: dict = {
+        "run_date": today_str,
+        "devig": args.devig,
+        "pred_col": args.pred_col,
+        "markets": {},
+        "artifacts": {},
+    }
 
-    # 2. Cruzar
-    df, unmatched = cross_odds_results(odds, results)
-    if unmatched:
-        log.warning("Partidos en cuotas SIN resultado real (¿futuros o nombre distinto?):")
-        for m in unmatched:
-            log.warning("  → %s", m)
-    log.info("Partidos cruzados con resultado: %d", len(df))
+    markets_to_run = SUPPORTED_MARKETS if args.market == "all" else (args.market,)
 
-    # 3. Añadir predicciones del modelo
-    df = rebuild_predictions(df, args.pred_col)
+    for market in markets_to_run:
+        if market == "total_over_under":
+            df, metrics = run_ou(devig_fn, args.pred_col)
+        elif market == "team_with_more":
+            df, metrics = run_team_with_more()
+        else:
+            continue
 
-    # 4. Calcular métricas por partido
-    df = compute_row_metrics(df)
+        print_summary(metrics)
+        summary["markets"][market] = metrics
+        paths = save_market(df, market, today_str)
+        if paths:
+            summary["artifacts"][market] = paths
 
-    # 5. Display
-    print_match_table(df)
-    metrics = compute_aggregate_metrics(df)
-    print_metrics(metrics)
-    cal = calibration_table(df)
-    print_calibration(cal)
-
-    # 6. Guardar
+    # Summary JSON
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-    today = date.today().strftime("%Y%m%d")
-    out_path = Path(args.output) if args.output else OUTPUT_DIR / f"eval_{today}.parquet"
-    df.to_parquet(out_path, index=False)
-    csv_path = out_path.with_suffix(".csv")
-    df.to_csv(csv_path, index=False)
-    log.info("Output guardado: %s", out_path)
-    log.info("CSV legible:     %s", csv_path)
+    summary_path = OUTPUT_DIR / f"eval_summary_{today_str}.json"
+    with open(summary_path, "w", encoding="utf-8") as f:
+        json.dump(summary, f, indent=2, default=str, sort_keys=True)
+    log.info("Summary JSON: %s", summary_path)
 
 
 if __name__ == "__main__":
