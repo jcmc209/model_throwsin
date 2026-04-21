@@ -28,10 +28,12 @@ Uso:
   python -m model.train --weights both      # ambos (default)
 
 Guardrail (team bias calibration):
-  Cualquier bloque futuro que genere o evalúe `team_bias_calibration_v2.json`
-  DEBE importar desde `model.market_utils` (`load_team_bias`, `apply_team_bias`).
-  No inlinear lógica de carga/aplicación en este archivo — el helper es la
-  fuente única consumida por `model/predict.py`.
+  Cualquier bloque que genere o evalúe `team_bias_calibration_v2.json`
+  DEBE importar desde `model.market_utils` (`load_team_bias`, `apply_team_bias`,
+  `shrink_bias`). No inlinear lógica de carga/aplicación/shrinkage en este archivo —
+  el helper es la fuente única consumida por `model/predict.py`. La regeneración
+  del JSON vive en `_regenerate_team_bias_calibration()` más abajo y se invoca
+  al final de `main()` tras guardar el joblib.
 """
 from __future__ import annotations
 
@@ -51,6 +53,7 @@ from sklearn.linear_model import LinearRegression
 from sklearn.metrics import mean_absolute_error, mean_squared_error
 
 from model.features import SHAP_SELECTED_FEATURES, TARGET_COL, get_feature_columns
+from model.market_utils import shrink_bias
 
 # ─────────────────────────────────────────────────────────────
 # LOGGING
@@ -82,6 +85,13 @@ CONFIG = {
     "feature_importance_total_path": "data/model/feature_importance_total.csv",
     "cv_results_path": "data/model/cv_results.json",
     "cv_results_csv_path": "data/model/cv_results.csv",
+    "team_bias_path": "data/model/team_bias_calibration_v2.json",
+    "team_bias_pre_regen_bak_path": "data/model/team_bias_calibration_v2_pre_regen_bak.json",
+    # Shrinkage prior (reverse-engineered del JSON frozen 2026-04-21):
+    # k = sigma2_res / sigma2_prior = 5.0, prior_mu = 0.0.
+    # Verificado con reverse-fit sobre las 40 filas (std(k)=0.002, rounding-level).
+    "team_bias_shrinkage_k": 5.0,
+    "team_bias_prior_mu": 0.0,
     "current_per_team_mae": 4.3379,
     "train_seasons": ["2021/2022", "2022/2023", "2023/2024", "2024/2025"],
     "val_seasons": ["2025/2026"],
@@ -563,6 +573,128 @@ def main_bivariate(weights_mode: str = "both") -> None:
 
 
 # ─────────────────────────────────────────────────────────────
+# TEAM BIAS CALIBRATION — regeneración post-training
+# ─────────────────────────────────────────────────────────────
+
+def _regenerate_team_bias_calibration(
+    model: lgb.LGBMRegressor,
+    val_df: pd.DataFrame,
+    feature_cols: list[str],
+    model_trained_at: str,
+    model_train_seasons: list[str],
+    out_path: str | Path | None = None,
+    backup_path: str | Path | None = None,
+    shrinkage_k: float | None = None,
+    prior_mu: float | None = None,
+) -> dict:
+    """
+    Regenera `team_bias_calibration_v2.json` desde residuos post-training.
+
+    Calcula, por cada (team_id, is_home) presente en `val_df`:
+      - n: nº de matches en val
+      - raw_bias: media de residuos (y_true - lambda_pred)
+      - shrunk_bias: posterior bayesiano usando `model.market_utils.shrink_bias`
+
+    Prior (reverse-engineered del JSON frozen del 2026-04-21):
+      prior_mu = 0, k = sigma2_res / sigma2_prior = 5.0.
+
+    Contrato:
+      - Usa SOLO `market_utils.shrink_bias` para la matemática de shrinkage
+        (invariante ADR D2 — no reimplementar inline).
+      - Escritura atómica: json.dump a `.tmp`, luego os.replace.
+      - Backup: si `backup_path` no existe todavía, copia el archivo actual allí.
+        Si ya existe, NO se sobrescribe (el backup es baseline histórico).
+      - Schema idéntico al JSON existente: corrections[tid][hid] = {n, raw_bias, shrunk_bias}.
+      - Top-level: description, generated_at, model_trained_at, model_train_seasons.
+
+    Args:
+        model: LGBMRegressor entrenado (debe tener predict()).
+        val_df: validation DataFrame con columnas team_id, is_home, TARGET_COL + feature_cols.
+        feature_cols: lista de features exactamente como las usa el modelo.
+        model_trained_at: timestamp del modelo (joblib artifact["trained_at"]).
+        model_train_seasons: temporadas de entrenamiento (para metadata).
+        out_path: destino del JSON. Default CONFIG["team_bias_path"].
+        backup_path: pre-regen backup. Default CONFIG["team_bias_pre_regen_bak_path"].
+        shrinkage_k: override del ratio k. Default CONFIG["team_bias_shrinkage_k"]=5.0.
+        prior_mu: override del prior mu. Default CONFIG["team_bias_prior_mu"]=0.0.
+
+    Returns:
+        El payload escrito (dict — útil para test/smoke).
+    """
+    import os
+    import shutil
+
+    out_p = Path(out_path or CONFIG["team_bias_path"])
+    bak_p = Path(backup_path or CONFIG["team_bias_pre_regen_bak_path"])
+    k = float(shrinkage_k if shrinkage_k is not None else CONFIG["team_bias_shrinkage_k"])
+    mu = float(prior_mu if prior_mu is not None else CONFIG["team_bias_prior_mu"])
+
+    # 1. Backup defensivo (solo si no existe). El backup es baseline inmutable.
+    if out_p.exists() and not bak_p.exists():
+        bak_p.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(out_p, bak_p)
+        log.info("team_bias backup creado: %s", bak_p)
+
+    # 2. Predecir sobre val y computar residuos.
+    X_val = val_df[feature_cols].astype(float)
+    y_true = val_df[TARGET_COL].astype(float).to_numpy()
+    lam_pred = np.asarray(model.predict(X_val), dtype=float)
+    residuals = y_true - lam_pred
+
+    # 3. Agregar por (team_id, is_home) y aplicar shrinkage.
+    agg_df = pd.DataFrame({
+        "team_id": val_df["team_id"].to_numpy(),
+        "is_home": val_df["is_home"].to_numpy(),
+        "residual": residuals,
+    })
+    grouped = agg_df.groupby(["team_id", "is_home"])["residual"].agg(["count", "mean"])
+
+    corrections: dict[str, dict[str, dict[str, float]]] = {}
+    raw_abs: list[float] = []
+    shr_abs: list[float] = []
+    for (tid, hid), row in grouped.iterrows():
+        n = int(row["count"])
+        raw = float(row["mean"])
+        shrunk = shrink_bias(raw, n, k=k, prior_mu=mu)
+        corrections.setdefault(str(int(tid)), {})[str(int(hid))] = {
+            "n": n,
+            "raw_bias": round(raw, 4),
+            "shrunk_bias": round(shrunk, 4),
+        }
+        raw_abs.append(abs(raw))
+        shr_abs.append(abs(shrunk))
+
+    payload = {
+        "description": (
+            "Sesgo post-hoc por (team_id, is_home) con shrinkage bayesiano — "
+            "regenerado desde model/train.py (prior normal-normal, k=%.2f, mu=%.2f)" % (k, mu)
+        ),
+        "generated_at": datetime.utcnow().isoformat() + "+00:00",
+        "model_trained_at": model_trained_at,
+        "model_train_seasons": list(model_train_seasons),
+        "shrinkage_k": k,
+        "prior_mu": mu,
+        "corrections": corrections,
+    }
+
+    # 4. Escritura atómica (tmp + os.replace). json.dump con sort_keys por idempotencia.
+    out_p.parent.mkdir(parents=True, exist_ok=True)
+    tmp_p = out_p.with_suffix(out_p.suffix + ".tmp")
+    with open(tmp_p, "w", encoding="utf-8") as f:
+        json.dump(payload, f, indent=2, ensure_ascii=False, sort_keys=True)
+    os.replace(tmp_p, out_p)
+
+    mean_raw = float(np.mean(raw_abs)) if raw_abs else 0.0
+    mean_shr = float(np.mean(shr_abs)) if shr_abs else 0.0
+    log.info(
+        "team_bias_regen teams=%d mean_abs_raw_bias=%.4f mean_abs_shrunk_bias=%.4f "
+        "prior_mu=%.4f shrinkage_k=%.4f out=%s",
+        len(corrections), mean_raw, mean_shr, mu, k, out_p,
+    )
+    return payload
+
+
+# ─────────────────────────────────────────────────────────────
 # MAIN
 # ─────────────────────────────────────────────────────────────
 
@@ -671,6 +803,20 @@ def main(weights_mode: str = "both", features_mode: str = "shap30") -> None:
     }
     joblib.dump(artifact, CONFIG["model_path"])
     log.info("Modelo guardado: %s", CONFIG["model_path"])
+
+    # Regeneración de team_bias_calibration_v2.json usando los residuos
+    # del modelo recién entrenado sobre el mismo `val`. Único code path que
+    # escribe este JSON (ADR D2 — helper compartido en market_utils.shrink_bias).
+    try:
+        _regenerate_team_bias_calibration(
+            model=best_model,
+            val_df=val,
+            feature_cols=feature_cols,
+            model_trained_at=artifact["trained_at"],
+            model_train_seasons=CONFIG["train_seasons"],
+        )
+    except Exception as exc:
+        log.error("team_bias_regen falló (JSON anterior intacto): %s", exc)
 
     metrics_out = {
         "trained_at": artifact["trained_at"],

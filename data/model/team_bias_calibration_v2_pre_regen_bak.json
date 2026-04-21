@@ -1,29 +1,14 @@
 {
+  "description": "Sesgo post-hoc por (team_id, is_home) con shrinkage bayesiano — regenerado tras tweedie-objective",
+  "generated_at": "2026-04-21T19:58:25.811052+00:00",
+  "model_trained_at": "2026-04-21T19:56:54",
+  "model_train_seasons": [
+    "2021/2022",
+    "2022/2023",
+    "2023/2024",
+    "2024/2025"
+  ],
   "corrections": {
-    "131": {
-      "0": {
-        "n": 14,
-        "raw_bias": -2.3168,
-        "shrunk_bias": -1.7071
-      },
-      "1": {
-        "n": 15,
-        "raw_bias": 0.6595,
-        "shrunk_bias": 0.4946
-      }
-    },
-    "2783": {
-      "0": {
-        "n": 14,
-        "raw_bias": -0.9662,
-        "shrunk_bias": -0.7119
-      },
-      "1": {
-        "n": 15,
-        "raw_bias": -1.7114,
-        "shrunk_bias": -1.2836
-      }
-    },
     "51": {
       "0": {
         "n": 14,
@@ -192,6 +177,18 @@
         "shrunk_bias": 1.3072
       }
     },
+    "131": {
+      "0": {
+        "n": 14,
+        "raw_bias": -2.3168,
+        "shrunk_bias": -1.7071
+      },
+      "1": {
+        "n": 15,
+        "raw_bias": 0.6595,
+        "shrunk_bias": 0.4946
+      }
+    },
     "819": {
       "0": {
         "n": 16,
@@ -239,17 +236,18 @@
         "raw_bias": 1.6898,
         "shrunk_bias": 1.2204
       }
+    },
+    "2783": {
+      "0": {
+        "n": 14,
+        "raw_bias": -0.9662,
+        "shrunk_bias": -0.7119
+      },
+      "1": {
+        "n": 15,
+        "raw_bias": -1.7114,
+        "shrunk_bias": -1.2836
+      }
     }
-  },
-  "description": "Sesgo post-hoc por (team_id, is_home) con shrinkage bayesiano — regenerado desde model/train.py (prior normal-normal, k=5.00, mu=0.00)",
-  "generated_at": "2026-04-21T22:58:12.134543+00:00",
-  "model_train_seasons": [
-    "2021/2022",
-    "2022/2023",
-    "2023/2024",
-    "2024/2025"
-  ],
-  "model_trained_at": "2026-04-21T19:56:54",
-  "prior_mu": 0.0,
-  "shrinkage_k": 5.0
+  }
 }

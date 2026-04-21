@@ -49,6 +49,7 @@ from model.market_utils import (
     poisson_over_prob,
     vig_pct,
 )
+from scripts.evaluation._normalize import _normalize_team_name
 
 logging.basicConfig(
     level=logging.INFO,
@@ -82,8 +83,12 @@ def load_odds_ou(devig_fn) -> pd.DataFrame:
     co = pd.read_parquet(ODDS_CODERE)
     co_ou = co[co["market_type"] == "total_over_under"].dropna(subset=["line"]).copy()
 
-    co_ou["home_ds"] = co_ou["home_team"].map(lambda x: normalize_team(x, "codere_to_ds"))
-    co_ou["away_ds"] = co_ou["away_team"].map(lambda x: normalize_team(x, "codere_to_ds"))
+    co_ou["home_ds"] = co_ou["home_team"].map(
+        lambda x: _normalize_team_name(normalize_team(x, "codere_to_ds"))
+    )
+    co_ou["away_ds"] = co_ou["away_team"].map(
+        lambda x: _normalize_team_name(normalize_team(x, "codere_to_ds"))
+    )
 
     over  = co_ou[co_ou["side"] == "over"].rename(columns={"odds": "odds_over"})
     under = co_ou[co_ou["side"] == "under"].rename(columns={"odds": "odds_under"})
@@ -132,8 +137,12 @@ def load_odds_team_with_more() -> pd.DataFrame:
     if twm.empty:
         return pd.DataFrame()
 
-    twm["home_ds"] = twm["home_team"].map(lambda x: normalize_team(x, "codere_to_ds"))
-    twm["away_ds"] = twm["away_team"].map(lambda x: normalize_team(x, "codere_to_ds"))
+    twm["home_ds"] = twm["home_team"].map(
+        lambda x: _normalize_team_name(normalize_team(x, "codere_to_ds"))
+    )
+    twm["away_ds"] = twm["away_team"].map(
+        lambda x: _normalize_team_name(normalize_team(x, "codere_to_ds"))
+    )
 
     # Snapshot más reciente por (partido, side) — evita que scrapes múltiples dupliquen
     twm = twm.sort_values("scraped_at", ascending=False, kind="stable")
@@ -186,6 +195,8 @@ def load_results_ou() -> pd.DataFrame:
         ["match_id", "team_name", "opponent_name", "match_date"]
     ].copy()
     home_info.columns = ["match_id", "home_ds", "away_ds", "match_date"]
+    home_info["home_ds"] = home_info["home_ds"].map(_normalize_team_name)
+    home_info["away_ds"] = home_info["away_ds"].map(_normalize_team_name)
 
     return totals.merge(home_info, on="match_id")
 
@@ -205,6 +216,8 @@ def load_results_team_with_more() -> pd.DataFrame:
         "opponent_name": "away_ds",
         "throw_ins_total": "real_home",
     })
+    home_rows["home_ds"] = home_rows["home_ds"].map(_normalize_team_name)
+    home_rows["away_ds"] = home_rows["away_ds"].map(_normalize_team_name)
     away_rows = ds26[ds26["is_home"] == 0][["match_id", "throw_ins_total"]].rename(
         columns={"throw_ins_total": "real_away"}
     )
@@ -241,12 +254,8 @@ def _load_pred_file(pf: Path, cols: list[str]) -> pd.DataFrame | None:
     if missing:
         return None
     pred = pred[["home_team", "away_team", "match_date", *cols]].copy()
-    pred["home_ds"] = pred["home_team"].map(
-        lambda x: normalize_team(normalize_team(x, "ds_to_codere"), "codere_to_ds")
-    )
-    pred["away_ds"] = pred["away_team"].map(
-        lambda x: normalize_team(normalize_team(x, "ds_to_codere"), "codere_to_ds")
-    )
+    pred["home_ds"] = pred["home_team"].map(_normalize_team_name)
+    pred["away_ds"] = pred["away_team"].map(_normalize_team_name)
     pred["match_date_pred"] = pd.to_datetime(pred["match_date"]).dt.date
     return pred
 
@@ -254,9 +263,10 @@ def _load_pred_file(pf: Path, cols: list[str]) -> pd.DataFrame | None:
 def attach_predictions_ou(df: pd.DataFrame, pred_col: str) -> pd.DataFrame:
     """
     Cruza predicciones (modelo v2) al backtest de O/U y añade `data_source`:
-      - model_v2         → cruce directo por (home, away, fecha) con `pred_col`
-      - rolling5_fallback → proxy desde dataset (rolling5 home + away)
-      - unmatched        → no se pudo recuperar predicción
+      - model_v2              → cruce directo por (home, away, fecha) con `pred_col`
+      - model_v2_date_drift   → cruce por (home, away) con |Δfecha| ≤ 3d (calendar stale)
+      - rolling5_fallback     → proxy desde dataset (rolling5 home + away)
+      - unmatched             → no se pudo recuperar predicción
 
     Emite WARN si fallback >20% (ADR D4). Nunca hard-fail.
     """
@@ -267,7 +277,9 @@ def attach_predictions_ou(df: pd.DataFrame, pred_col: str) -> pd.DataFrame:
     pred_dir = OUTPUT_DIR.parent / "predictions"
     pred_files = sorted(pred_dir.glob("predictions_*.parquet"))
     n_matched = 0
+    n_drift = 0
 
+    # Pass 1 — strict (home, away, exact date) — preserves original semantics.
     for pf in pred_files:
         pred_slim = _load_pred_file(pf, [pred_col])
         if pred_slim is None:
@@ -288,8 +300,39 @@ def attach_predictions_ou(df: pd.DataFrame, pred_col: str) -> pd.DataFrame:
                 df.at[idx, "data_source"] = "model_v2"
                 n_matched += 1
 
+    # Pass 2 — tolerant (home, away, |Δfecha| ≤ 3 días). Recupera partidos
+    # donde el calendario fuente (liga_calendar_rows.csv) tenía fecha desfasada
+    # respecto al dataset (que refleja fecha real jugada per whoscored).
+    # Zero pair-collisions observadas en predictions/* → safe a nivel de semántica.
+    still_unmatched = df["data_source"] == "unmatched"
+    if still_unmatched.any():
+        for pf in pred_files:
+            pred_slim = _load_pred_file(pf, [pred_col])
+            if pred_slim is None:
+                continue
+            pred_slim = pred_slim.rename(columns={pred_col: "pred_total_tmp"})
+            df_dates_full = pd.to_datetime(df["match_date"])
+            pred_dates = pd.to_datetime(pred_slim["match_date_pred"])
+            for idx in df.index[df["data_source"] == "unmatched"]:
+                row = df.loc[idx]
+                mask = (
+                    (pred_slim["home_ds"] == row["home_ds"])
+                    & (pred_slim["away_ds"] == row["away_ds"])
+                    & ((pred_dates - df_dates_full.loc[idx]).abs() <= pd.Timedelta(days=3))
+                )
+                match = pred_slim[mask]
+                if not match.empty:
+                    df.at[idx, "pred_total"] = float(match["pred_total_tmp"].values[0])
+                    df.at[idx, "data_source"] = "model_v2_date_drift"
+                    n_drift += 1
+
     if n_matched:
         log.info("Predicciones modelo_v2 cargadas: %d partidos", n_matched)
+    if n_drift:
+        log.info(
+            "Predicciones modelo_v2 recuperadas via date-drift tolerance: %d partidos",
+            n_drift,
+        )
 
     # Fallback rolling5 — proxy
     missing_mask = df["data_source"] == "unmatched"
@@ -311,12 +354,8 @@ def attach_predictions_ou(df: pd.DataFrame, pred_col: str) -> pd.DataFrame:
             r5["rolling5_throw_ins_total_home"].fillna(18)
             + r5["rolling5_throw_ins_total_away"].fillna(18)
         )
-        r5["home_ds"] = r5["team_name_home"].map(
-            lambda x: normalize_team(normalize_team(x, "ds_to_codere"), "codere_to_ds")
-        )
-        r5["away_ds"] = r5["opponent_name"].map(
-            lambda x: normalize_team(normalize_team(x, "ds_to_codere"), "codere_to_ds")
-        )
+        r5["home_ds"] = r5["team_name_home"].map(_normalize_team_name)
+        r5["away_ds"] = r5["opponent_name"].map(_normalize_team_name)
         proxy_map = dict(zip(zip(r5["home_ds"], r5["away_ds"]), r5["lam_proxy"]))
 
         for idx in df.index[missing_mask]:
@@ -348,9 +387,10 @@ def attach_predictions_team_with_more(df: pd.DataFrame) -> pd.DataFrame:
     necesita `pred_home_v2` y `pred_away_v2` por separado.
 
     Tagging:
-      - model_v2          → cruce directo
-      - rolling5_fallback → rolling5 home / rolling5 away desde dataset
-      - unmatched         → no recuperable
+      - model_v2              → cruce directo por (home, away, fecha)
+      - model_v2_date_drift   → cruce por (home, away) con |Δfecha| ≤ 3d (calendar stale)
+      - rolling5_fallback     → rolling5 home / rolling5 away desde dataset
+      - unmatched             → no recuperable
     """
     df = df.copy()
     df["pred_home_lam"] = np.nan
@@ -360,7 +400,9 @@ def attach_predictions_team_with_more(df: pd.DataFrame) -> pd.DataFrame:
     pred_dir = OUTPUT_DIR.parent / "predictions"
     pred_files = sorted(pred_dir.glob("predictions_*.parquet"))
     n_matched = 0
+    n_drift = 0
 
+    # Pass 1 — strict (home, away, exact date).
     for pf in pred_files:
         pred_slim = _load_pred_file(pf, ["pred_home_v2", "pred_away_v2"])
         if pred_slim is None:
@@ -381,8 +423,36 @@ def attach_predictions_team_with_more(df: pd.DataFrame) -> pd.DataFrame:
                 df.at[idx, "data_source"] = "model_v2"
                 n_matched += 1
 
+    # Pass 2 — tolerant (home, away, |Δfecha| ≤ 3d). Recupera partidos donde
+    # el calendar fuente tenía fecha desfasada vs dataset (fecha real jugada).
+    if (df["data_source"] == "unmatched").any():
+        for pf in pred_files:
+            pred_slim = _load_pred_file(pf, ["pred_home_v2", "pred_away_v2"])
+            if pred_slim is None:
+                continue
+            df_dates_full = pd.to_datetime(df["match_date"])
+            pred_dates = pd.to_datetime(pred_slim["match_date_pred"])
+            for idx in df.index[df["data_source"] == "unmatched"]:
+                row = df.loc[idx]
+                mask = (
+                    (pred_slim["home_ds"] == row["home_ds"])
+                    & (pred_slim["away_ds"] == row["away_ds"])
+                    & ((pred_dates - df_dates_full.loc[idx]).abs() <= pd.Timedelta(days=3))
+                )
+                match = pred_slim[mask]
+                if not match.empty:
+                    df.at[idx, "pred_home_lam"] = float(match["pred_home_v2"].values[0])
+                    df.at[idx, "pred_away_lam"] = float(match["pred_away_v2"].values[0])
+                    df.at[idx, "data_source"] = "model_v2_date_drift"
+                    n_drift += 1
+
     if n_matched:
         log.info("Predicciones modelo_v2 cargadas (team_with_more): %d partidos", n_matched)
+    if n_drift:
+        log.info(
+            "Predicciones modelo_v2 recuperadas via date-drift tolerance (team_with_more): %d partidos",
+            n_drift,
+        )
 
     missing_mask = df["data_source"] == "unmatched"
     n_missing = int(missing_mask.sum())
@@ -400,12 +470,8 @@ def attach_predictions_team_with_more(df: pd.DataFrame) -> pd.DataFrame:
         r5 = home_r5.merge(away_r5, on="match_id", how="inner")
         r5["lam_home_proxy"] = r5["lam_home_proxy"].fillna(18)
         r5["lam_away_proxy"] = r5["lam_away_proxy"].fillna(18)
-        r5["home_ds"] = r5["team_name"].map(
-            lambda x: normalize_team(normalize_team(x, "ds_to_codere"), "codere_to_ds")
-        )
-        r5["away_ds"] = r5["opponent_name"].map(
-            lambda x: normalize_team(normalize_team(x, "ds_to_codere"), "codere_to_ds")
-        )
+        r5["home_ds"] = r5["team_name"].map(_normalize_team_name)
+        r5["away_ds"] = r5["opponent_name"].map(_normalize_team_name)
         proxy_map = {
             (h, a): (lh, la)
             for h, a, lh, la in zip(
@@ -578,7 +644,9 @@ def aggregate_ou(df: pd.DataFrame) -> dict:
     out["avg_vig_pct"] = float(df["vig_pct"].mean()) if len(df) else float("nan")
 
     # Modelo — dos subconjuntos: model_v2 vs all
-    for subset_name, mask in (("model_v2", df["data_source"] == "model_v2"),
+    # model_v2 incluye model_v2_date_drift (recupera date-flip bugs del scraper de calendario)
+    _model_v2_mask = df["data_source"].isin(["model_v2", "model_v2_date_drift"])
+    for subset_name, mask in (("model_v2", _model_v2_mask),
                               ("all", df["pred_total"].notna())):
         sub = df[mask].copy()
         n = len(sub)
@@ -648,7 +716,9 @@ def aggregate_team_with_more(df: pd.DataFrame) -> dict:
     # VIG medio (3-way)
     out["avg_vig_pct"] = float(df["vig_pct"].mean()) if len(df) else float("nan")
 
-    for subset_name, mask in (("model_v2", df["data_source"] == "model_v2"),
+    # model_v2 incluye model_v2_date_drift (recupera date-flip bugs del scraper de calendario)
+    _model_v2_mask = df["data_source"].isin(["model_v2", "model_v2_date_drift"])
+    for subset_name, mask in (("model_v2", _model_v2_mask),
                               ("all", df["pred_home_lam"].notna())):
         sub = df[mask].copy()
         n = len(sub)

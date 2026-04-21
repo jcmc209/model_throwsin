@@ -14,6 +14,7 @@ Funciones disponibles:
   normalize_team(name)                → str
   load_team_bias(path)                → dict
   apply_team_bias(lam, team_id, is_home, bias_table)  → ndarray
+  shrink_bias(raw_bias, n, k, prior_mu) → float   (Bayesian normal-normal)
   p_home_more(lam_h, lam_w, method)   → (p_home, p_tie, p_away)
 """
 from __future__ import annotations
@@ -234,6 +235,47 @@ def load_team_bias(
 
     log.info("team_bias cargado: %d equipos desde %s", len(table), p)
     return table
+
+
+def shrink_bias(
+    raw_bias: float,
+    n: int,
+    k: float = 5.0,
+    prior_mu: float = 0.0,
+) -> float:
+    """
+    Aplica shrinkage bayesiano (modelo normal-normal) a un bias crudo por equipo.
+
+    Modelo:
+      - Prior sobre el bias verdadero por equipo: bias ~ N(prior_mu, sigma2_prior).
+      - Residuales por match: y - lambda ~ N(bias, sigma2_res).
+      - Observamos n residuales; el bias crudo es su media.
+
+    Posterior media (fórmula cerrada):
+      shrunk = (n·raw / sigma2_res + prior_mu / sigma2_prior) /
+               (n / sigma2_res + 1 / sigma2_prior)
+             = raw · n / (n + k)   cuando prior_mu = 0 y k = sigma2_res / sigma2_prior.
+
+    El JSON frozen `team_bias_calibration_v2.json` se generó con k=5.0 y prior_mu=0
+    (verificado por reverse-engineering sobre las 40 filas n·raw/(n+k)≈shrunk, std=0.002).
+    Mantener esa pareja garantiza que la regeneración reproduce la tabla actual
+    cuando el modelo no cambia (verificación vía smoke `check_calibration_regen`).
+
+    Args:
+        raw_bias: media de residuales (y_true - lambda_pred) para (team_id, is_home).
+        n: número de observaciones (matches).
+        k: ratio sigma2_res / sigma2_prior. Default 5.0 — prior frozen.
+        prior_mu: media del prior. Default 0.0 — "sin bias a priori".
+
+    Returns:
+        shrunk_bias posterior (float).
+    """
+    if n <= 0:
+        return float(prior_mu)
+    # Forma equivalente con prior_mu != 0:
+    # w = n / (n + k); shrunk = w * raw + (1 - w) * prior_mu
+    w = n / (n + k)
+    return float(w * raw_bias + (1.0 - w) * prior_mu)
 
 
 def apply_team_bias(

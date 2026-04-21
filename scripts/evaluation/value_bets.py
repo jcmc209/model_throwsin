@@ -49,6 +49,7 @@ from model.market_utils import (
     poisson_under_prob,
     vig_pct,
 )
+from scripts.evaluation._normalize import _normalize_team_name
 
 logging.basicConfig(
     level=logging.INFO,
@@ -96,8 +97,8 @@ def load_latest_predictions_total(pred_col: str) -> pd.DataFrame:
 
     pred = pred[["home_team", "away_team", "match_date", pred_col]].copy()
     pred.columns = ["home_ds", "away_ds", "match_date", "pred_total"]
-    pred["home_ds"] = pred["home_ds"].map(lambda x: normalize_team(normalize_team(x, "ds_to_codere"), "codere_to_ds"))
-    pred["away_ds"] = pred["away_ds"].map(lambda x: normalize_team(normalize_team(x, "ds_to_codere"), "codere_to_ds"))
+    pred["home_ds"] = pred["home_ds"].map(_normalize_team_name)
+    pred["away_ds"] = pred["away_ds"].map(_normalize_team_name)
     return pred
 
 
@@ -118,8 +119,8 @@ def load_latest_predictions_per_team() -> pd.DataFrame:
         "pred_home_v2": "pred_home_lam",
         "pred_away_v2": "pred_away_lam",
     })
-    pred["home_ds"] = pred["home_ds"].map(lambda x: normalize_team(normalize_team(x, "ds_to_codere"), "codere_to_ds"))
-    pred["away_ds"] = pred["away_ds"].map(lambda x: normalize_team(normalize_team(x, "ds_to_codere"), "codere_to_ds"))
+    pred["home_ds"] = pred["home_ds"].map(_normalize_team_name)
+    pred["away_ds"] = pred["away_ds"].map(_normalize_team_name)
     return pred
 
 
@@ -138,8 +139,12 @@ def load_codere_odds_ou() -> pd.DataFrame | None:
     if co_ou.empty:
         return None
 
-    co_ou["home_ds"] = co_ou["home_team"].map(lambda x: normalize_team(x, "codere_to_ds"))
-    co_ou["away_ds"] = co_ou["away_team"].map(lambda x: normalize_team(x, "codere_to_ds"))
+    co_ou["home_ds"] = co_ou["home_team"].map(
+        lambda x: _normalize_team_name(normalize_team(x, "codere_to_ds"))
+    )
+    co_ou["away_ds"] = co_ou["away_team"].map(
+        lambda x: _normalize_team_name(normalize_team(x, "codere_to_ds"))
+    )
 
     co_ou = co_ou.sort_values("scraped_at", ascending=False, kind="stable")
     co_ou = co_ou.drop_duplicates(subset=["home_ds", "away_ds", "line", "side"], keep="first")
@@ -177,8 +182,12 @@ def load_22bet_odds_ou() -> pd.DataFrame | None:
     merged = over[key + ["odds"]].rename(columns={"odds": "odds_over"}).merge(
         under[key + ["odds"]].rename(columns={"odds": "odds_under"}), on=key
     )
-    merged["home_ds"] = merged["home_team"].map(lambda x: normalize_team(x, "codere_to_ds"))
-    merged["away_ds"] = merged["away_team"].map(lambda x: normalize_team(x, "codere_to_ds"))
+    merged["home_ds"] = merged["home_team"].map(
+        lambda x: _normalize_team_name(normalize_team(x, "codere_to_ds"))
+    )
+    merged["away_ds"] = merged["away_team"].map(
+        lambda x: _normalize_team_name(normalize_team(x, "codere_to_ds"))
+    )
     merged["bookmaker"] = "22bet"
     merged["scraped_at"] = over["scraped_at"].values[0] if time_col and len(over) else None
     merged["market_type"] = "total_over_under"
@@ -196,8 +205,12 @@ def load_codere_odds_team_with_more() -> pd.DataFrame | None:
     if twm.empty:
         return None
 
-    twm["home_ds"] = twm["home_team"].map(lambda x: normalize_team(x, "codere_to_ds"))
-    twm["away_ds"] = twm["away_team"].map(lambda x: normalize_team(x, "codere_to_ds"))
+    twm["home_ds"] = twm["home_team"].map(
+        lambda x: _normalize_team_name(normalize_team(x, "codere_to_ds"))
+    )
+    twm["away_ds"] = twm["away_team"].map(
+        lambda x: _normalize_team_name(normalize_team(x, "codere_to_ds"))
+    )
 
     twm = twm.sort_values("scraped_at", ascending=False, kind="stable")
     twm = twm.drop_duplicates(subset=["home_ds", "away_ds", "side"], keep="first")
