@@ -16,9 +16,9 @@ Codere para los partidos de LaLiga. Dos modos:
    `data/reference/odds_history.parquet` con una fila por (match, timestamp, line).
 
 Uso:
-  python scripts/codere_scraper.py --discover             # 1 vez, cuando el mercado esté abierto
-  python scripts/codere_scraper.py                        # fetch, puede lanzarse cada N min
-  python scripts/codere_scraper.py --dry-run              # fetch sin guardar (debug)
+  python scripts/odds/codere_scraper.py --discover             # 1 vez, cuando el mercado esté abierto
+  python scripts/odds/codere_scraper.py                        # fetch, puede lanzarse cada N min
+  python scripts/odds/codere_scraper.py --dry-run              # fetch sin guardar (debug)
 """
 from __future__ import annotations
 
@@ -159,7 +159,7 @@ def discover() -> None:
     print(f"  3. Edita manualmente {out_path} añadiendo campos:")
     print('       "events_endpoint": "URL o patrón con {liga_id}",')
     print('       "markets_endpoint": "URL o patrón con {event_id}"')
-    print(f"  4. Ejecuta: python scripts/codere_scraper.py (modo fetch)")
+    print(f"  4. Ejecuta: python scripts/odds/codere_scraper.py (modo fetch)")
 
 
 # ─────────────────────────────────────────────────────────────

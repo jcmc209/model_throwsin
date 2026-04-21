@@ -1,7 +1,7 @@
 {
-  "run_at": "2026-04-20T21:42:58.453265Z",
+  "run_at": "2026-04-21T14:45:41.907879Z",
   "features_mode": "shap30",
-  "n_features": 35,
+  "n_features": 37,
   "lgb_params": {
     "objective": "poisson",
     "metric": "mae",
@@ -20,52 +20,106 @@
   "early_stopping_rounds": 100,
   "folds": [
     {
-      "name": "fold1_23-24",
+      "name": "fold0_21-22",
       "train_seasons": [
+        "2019/2020",
+        "2020/2021"
+      ],
+      "val_season": "2021/2022",
+      "is_partial": false,
+      "n_train": 1406,
+      "n_val": 758,
+      "val_mae": 4.0235,
+      "val_rmse": 5.1567,
+      "train_mae": 3.2364,
+      "train_val_gap": 0.8044,
+      "best_iteration": 136,
+      "baseline_mae": 4.8386,
+      "decay_weights": {
+        "2019/2020": 0.8,
+        "2020/2021": 1.0
+      }
+    },
+    {
+      "name": "fold1_22-23",
+      "train_seasons": [
+        "2019/2020",
+        "2020/2021",
+        "2021/2022"
+      ],
+      "val_season": "2022/2023",
+      "is_partial": false,
+      "n_train": 2164,
+      "n_val": 760,
+      "val_mae": 3.7453,
+      "val_rmse": 4.8185,
+      "train_mae": 3.2282,
+      "train_val_gap": 0.8619,
+      "best_iteration": 194,
+      "baseline_mae": 4.6926,
+      "decay_weights": {
+        "2019/2020": 0.6,
+        "2020/2021": 0.8,
+        "2021/2022": 1.0
+      }
+    },
+    {
+      "name": "fold2_23-24",
+      "train_seasons": [
+        "2019/2020",
+        "2020/2021",
         "2021/2022",
         "2022/2023"
       ],
       "val_season": "2023/2024",
       "is_partial": false,
-      "n_train": 1518,
+      "n_train": 2924,
       "n_val": 760,
-      "val_mae": 4.0698,
-      "val_rmse": 5.0772,
-      "train_mae": 3.0374,
-      "train_val_gap": 0.7463,
-      "best_iteration": 152,
-      "baseline_mae": 4.7571,
+      "val_mae": 4.1064,
+      "val_rmse": 5.1373,
+      "train_mae": 3.1877,
+      "train_val_gap": 0.7763,
+      "best_iteration": 246,
+      "baseline_mae": 4.8619,
       "decay_weights": {
+        "2019/2020": 0.4,
+        "2020/2021": 0.6,
         "2021/2022": 0.8,
         "2022/2023": 1.0
       }
     },
     {
-      "name": "fold2_24-25",
+      "name": "fold3_24-25",
       "train_seasons": [
+        "2019/2020",
+        "2020/2021",
         "2021/2022",
         "2022/2023",
         "2023/2024"
       ],
       "val_season": "2024/2025",
       "is_partial": false,
-      "n_train": 2278,
+      "n_train": 3684,
       "n_val": 760,
-      "val_mae": 3.9282,
-      "val_rmse": 5.0093,
-      "train_mae": 3.0576,
-      "train_val_gap": 0.7784,
-      "best_iteration": 213,
-      "baseline_mae": 4.7698,
+      "val_mae": 3.916,
+      "val_rmse": 4.9941,
+      "train_mae": 3.2467,
+      "train_val_gap": 0.8291,
+      "best_iteration": 290,
+      "baseline_mae": 4.8983,
       "decay_weights": {
+        "2019/2020": 0.2,
+        "2020/2021": 0.4,
         "2021/2022": 0.6,
         "2022/2023": 0.8,
         "2023/2024": 1.0
       }
     },
     {
-      "name": "fold3_25-26",
+      "name": "fold4_25-26",
       "train_seasons": [
+        "2019/2020",
+        "2020/2021",
         "2021/2022",
         "2022/2023",
         "2023/2024",
@@ -73,15 +127,17 @@
       ],
       "val_season": "2025/2026",
       "is_partial": true,
-      "n_train": 3038,
+      "n_train": 4444,
       "n_val": 584,
-      "val_mae": 3.773,
-      "val_rmse": 4.7795,
-      "train_mae": 3.4937,
-      "train_val_gap": 0.926,
-      "best_iteration": 123,
-      "baseline_mae": 4.5883,
+      "val_mae": 3.7863,
+      "val_rmse": 4.7738,
+      "train_mae": 3.5903,
+      "train_val_gap": 0.9482,
+      "best_iteration": 164,
+      "baseline_mae": 4.5983,
       "decay_weights": {
+        "2019/2020": 0.2,
+        "2020/2021": 0.2,
         "2021/2022": 0.4,
         "2022/2023": 0.6,
         "2023/2024": 0.8,
@@ -90,12 +146,12 @@
     }
   ],
   "aggregated": {
-    "n_complete_folds": 2,
-    "mean_val_mae": 3.999,
-    "std_val_mae": 0.0708,
-    "min_val_mae": 3.9282,
-    "max_val_mae": 4.0698,
-    "range_val_mae": 0.1416
+    "n_complete_folds": 4,
+    "mean_val_mae": 3.9478,
+    "std_val_mae": 0.135,
+    "min_val_mae": 3.7453,
+    "max_val_mae": 4.1064,
+    "range_val_mae": 0.3611
   },
-  "significant_delta_2sigma": 0.1416
+  "significant_delta_2sigma": 0.27
 }

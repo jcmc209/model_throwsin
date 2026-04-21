@@ -77,46 +77,65 @@ CONFIG = {
     "cv_results_path": "data/model/cv_results.json",
     "cv_results_csv_path": "data/model/cv_results.csv",
     "current_per_team_mae": 4.3379,
-    "train_seasons": ["2021/2022", "2022/2023", "2023/2024"],
-    "val_seasons": ["2024/2025"],
-    "test_seasons": ["2025/2026"],
+    "train_seasons": ["2021/2022", "2022/2023", "2023/2024", "2024/2025"],
+    "val_seasons": ["2025/2026"],
+    "test_seasons": [],
     "cv_folds": [
         {
-            "name": "fold1_23-24",
-            "train_seasons": ["2021/2022", "2022/2023"],
+            "name": "fold0_21-22",
+            "train_seasons": ["2019/2020", "2020/2021"],
+            "val_season": "2021/2022",
+            "is_partial": False,
+        },
+        {
+            "name": "fold1_22-23",
+            "train_seasons": ["2019/2020", "2020/2021", "2021/2022"],
+            "val_season": "2022/2023",
+            "is_partial": False,
+        },
+        {
+            "name": "fold2_23-24",
+            "train_seasons": ["2019/2020", "2020/2021", "2021/2022", "2022/2023"],
             "val_season": "2023/2024",
             "is_partial": False,
         },
         {
-            "name": "fold2_24-25",
-            "train_seasons": ["2021/2022", "2022/2023", "2023/2024"],
+            "name": "fold3_24-25",
+            "train_seasons": ["2019/2020", "2020/2021", "2021/2022", "2022/2023", "2023/2024"],
             "val_season": "2024/2025",
             "is_partial": False,
         },
         {
-            "name": "fold3_25-26",
-            "train_seasons": ["2021/2022", "2022/2023", "2023/2024", "2024/2025"],
+            "name": "fold4_25-26",
+            "train_seasons": ["2019/2020", "2020/2021", "2021/2022", "2022/2023", "2023/2024", "2024/2025"],
             "val_season": "2025/2026",
             "is_partial": True,
         },
     ],
     "baseline_target_mae": 4.84,
     "season_decay_weights": {
-        "2021/2022": 0.6,
-        "2022/2023": 0.8,
-        "2023/2024": 1.0,
+        # Auto-decay pattern for 4 train seasons: most recent=1.0, each older −0.2 (min 0.2)
+        # Bootstrap confirmed auto-decay outperforms steeper schemes (see validate_season_weights.py)
+        "2019/2020": 0.2,  # used in CV folds only
+        "2020/2021": 0.2,  # used in CV folds only
+        "2021/2022": 0.4,
+        "2022/2023": 0.6,
+        "2023/2024": 0.8,
+        "2024/2025": 1.0,
     },
     "lgb_params": {
         "objective": "poisson",
         "metric": "mae",
-        "learning_rate": 0.05,
-        "num_leaves": 15,
-        "min_child_samples": 50,
-        "feature_fraction": 0.6,
-        "bagging_fraction": 0.9,
+        # Hiperparámetros optimizados por Optuna (60 trials, 2026-04-21)
+        # trial #51 → mean_val_MAE=3.9300 (baseline=3.9478, Δ=-0.018, p=0.016)
+        "learning_rate": 0.049,
+        "num_leaves": 4,
+        "min_child_samples": 115,
+        "feature_fraction": 0.543,
+        "bagging_fraction": 0.712,
         "bagging_freq": 5,
-        "reg_lambda": 1.0,
-        "reg_alpha": 0.1,
+        "reg_lambda": 8.10,
+        "reg_alpha": 2.83,
         "verbose": -1,
         "n_estimators": 2000,
         "random_state": 42,
@@ -193,8 +212,11 @@ def train_lightgbm(
     X_val: pd.DataFrame,
     y_val: pd.Series,
     sample_weight: np.ndarray | None,
+    lgb_params_override: dict | None = None,
 ) -> lgb.LGBMRegressor:
     params = dict(CONFIG["lgb_params"])
+    if lgb_params_override:
+        params.update(lgb_params_override)
     model = lgb.LGBMRegressor(**params)
     model.fit(
         X_train,
@@ -870,6 +892,211 @@ def run_walk_forward_cv(features_mode: str = "shap30") -> dict:
     log.info("CV CSV guardado: %s", CONFIG["cv_results_csv_path"])
 
     return out
+
+
+def run_experiment_cv(
+    feature_list: list[str],
+    label: str = "experiment",
+    features_mode: str = "custom",
+    lgb_params_override: dict | None = None,
+) -> dict:
+    """
+    Evalúa una lista de features sobre los 5 folds de walk-forward CV.
+
+    Devuelve mean_val_MAE ± std (para compatibilidad) y además el DataFrame de
+    predicciones pooled de todos los folds completos, necesario para
+    compare_experiments_bootstrap().
+
+    Uso recomendado:
+
+        baseline  = run_experiment_cv(SHAP_SELECTED_FEATURES, label="baseline")
+        candidate = run_experiment_cv(SHAP_SELECTED_FEATURES + ["new_feat"], label="new_feat")
+        cmp = compare_experiments_bootstrap(baseline, candidate)
+        print(f"Δ={cmp['delta_mean']:+.4f}  IC95%=[{cmp['delta_ci_low']:+.4f}, {cmp['delta_ci_high']:+.4f}]  sig={cmp['significant']}")
+
+    Args:
+        feature_list:  lista de columnas a usar como features.
+        label:         nombre del experimento (aparece en logs y en el JSON de salida).
+        features_mode: string descriptivo del método de selección (solo para metadata).
+
+    Returns:
+        dict con mean_val_mae, std_val_mae, significant_delta_2sigma, folds_detail,
+        y además result["predictions"] (DataFrame con match_id, is_home, y_true, y_pred, fold).
+    """
+    df = load_dataset()
+
+    missing = [f for f in feature_list if f not in df.columns]
+    if missing:
+        raise ValueError(f"run_experiment_cv: features ausentes en dataset: {missing}")
+
+    log.info("=== Experimento CV: %s | %d features ===", label, len(feature_list))
+
+    folds_out: list[dict] = []
+    pred_frames: list[pd.DataFrame] = []
+
+    for fold_cfg in CONFIG["cv_folds"]:
+        name = fold_cfg["name"]
+        train_seasons = fold_cfg["train_seasons"]
+        val_season = fold_cfg["val_season"]
+        is_partial = fold_cfg["is_partial"]
+
+        train = df[df["season"].isin(train_seasons)].copy()
+        val = df[df["season"] == val_season].copy()
+
+        if train.empty or val.empty:
+            log.warning("Fold %s saltado (train=%d, val=%d)", name, len(train), len(val))
+            continue
+
+        decay_map = _build_decay_weights(train_seasons)
+        sw = _decay_sample_weights(train, decay_map)
+
+        model = train_lightgbm(
+            train[feature_list], train[TARGET_COL],
+            val[feature_list], val[TARGET_COL],
+            sw,
+            lgb_params_override=lgb_params_override,
+        )
+        preds = model.predict(val[feature_list])
+        val_mae = float(mean_absolute_error(val[TARGET_COL], preds))
+        log.info("  %s → val_MAE %.4f%s", name, val_mae, " [PARTIAL]" if is_partial else "")
+
+        folds_out.append({
+            "name": name,
+            "val_season": val_season,
+            "is_partial": is_partial,
+            "val_mae": round(val_mae, 4),
+        })
+
+        if not is_partial:
+            pred_frames.append(pd.DataFrame({
+                "match_id": val["match_id"].values,
+                "is_home": val["is_home"].values,
+                "y_true": val[TARGET_COL].values,
+                "y_pred": preds,
+                "fold": name,
+            }))
+
+    complete = [f for f in folds_out if not f["is_partial"]]
+    maes = [f["val_mae"] for f in complete]
+    mean_mae = float(np.mean(maes)) if maes else 0.0
+    std_mae = float(np.std(maes, ddof=0)) if maes else 0.0
+    significant_delta = round(2 * std_mae, 4)
+
+    predictions_df = pd.concat(pred_frames, ignore_index=True) if pred_frames else pd.DataFrame()
+
+    log.info(
+        "=== %s — mean_MAE=%.4f | std=%.4f | 2σ=%.4f | n_preds=%d ===",
+        label, mean_mae, std_mae, significant_delta, len(predictions_df),
+    )
+
+    return {
+        "label": label,
+        "n_features": len(feature_list),
+        "features_mode": features_mode,
+        "n_complete_folds": len(complete),
+        "mean_val_mae": round(mean_mae, 4),
+        "std_val_mae": round(std_mae, 4),
+        "significant_delta_2sigma": significant_delta,
+        "folds": folds_out,
+        "predictions": predictions_df,
+    }
+
+
+def compare_experiments_bootstrap(
+    result_a: dict,
+    result_b: dict,
+    n_boot: int = 2000,
+    seed: int = 42,
+) -> dict:
+    """
+    Paired cluster bootstrap para comparar dos experimentos de CV.
+
+    Resamplea partidos completos (cluster = match_id, que agrupa home + away) con
+    reemplazo y calcula Δ MAE = MAE(b) - MAE(a) en cada iteración. Un valor
+    negativo significa que B es mejor (menor MAE).
+
+    Args:
+        result_a:  dict devuelto por run_experiment_cv() (baseline).
+        result_b:  dict devuelto por run_experiment_cv() (candidato).
+        n_boot:    número de iteraciones bootstrap (default 2000).
+        seed:      semilla para reproducibilidad.
+
+    Returns:
+        dict con:
+          delta_mean      — Δ MAE medio observado (b - a); negativo = b mejor
+          delta_ci_low    — percentil 2.5% del bootstrap
+          delta_ci_high   — percentil 97.5% del bootstrap
+          p_value         — fracción de bootstrap donde Δ > 0 (o < 0 si delta_mean < 0)
+          significant     — True si el IC 95% no cruza 0
+          ci_halfwidth    — (delta_ci_high - delta_ci_low) / 2; umbral efectivo
+          n_matches       — número de partidos únicos en el pool
+          n_rows          — número de filas (home+away) en el pool
+    """
+    preds_a = result_a.get("predictions")
+    preds_b = result_b.get("predictions")
+
+    if preds_a is None or preds_b is None or preds_a.empty or preds_b.empty:
+        raise ValueError(
+            "compare_experiments_bootstrap: ambos resultados deben contener 'predictions'. "
+            "Usa run_experiment_cv() para generarlos."
+        )
+
+    merged = preds_a[["match_id", "is_home", "y_true", "y_pred"]].merge(
+        preds_b[["match_id", "is_home", "y_pred"]].rename(columns={"y_pred": "y_pred_b"}),
+        on=["match_id", "is_home"],
+        how="inner",
+    )
+
+    if merged.empty:
+        raise ValueError("compare_experiments_bootstrap: sin partidos comunes entre experimentos.")
+
+    match_ids = merged["match_id"].unique()
+    n_matches = len(match_ids)
+    rng = np.random.default_rng(seed)
+
+    delta_obs = float(
+        mean_absolute_error(merged["y_true"], merged["y_pred_b"])
+        - mean_absolute_error(merged["y_true"], merged["y_pred"])
+    )
+
+    boot_deltas = np.empty(n_boot)
+    for i in range(n_boot):
+        sampled_ids = rng.choice(match_ids, size=n_matches, replace=True)
+        mask = merged["match_id"].isin(sampled_ids)
+        sub = merged[mask]
+        mae_a = np.mean(np.abs(sub["y_true"].values - sub["y_pred"].values))
+        mae_b = np.mean(np.abs(sub["y_true"].values - sub["y_pred_b"].values))
+        boot_deltas[i] = mae_b - mae_a
+
+    ci_low = float(np.percentile(boot_deltas, 2.5))
+    ci_high = float(np.percentile(boot_deltas, 97.5))
+    significant = not (ci_low <= 0 <= ci_high)
+
+    if delta_obs < 0:
+        p_value = float(np.mean(boot_deltas >= 0))
+    else:
+        p_value = float(np.mean(boot_deltas <= 0))
+
+    ci_halfwidth = round((ci_high - ci_low) / 2, 4)
+
+    log.info(
+        "Bootstrap [%s vs %s] delta=%+.4f  IC95=[%+.4f, %+.4f]  p=%.3f  sig=%s  halfwidth=%.4f",
+        result_a["label"], result_b["label"],
+        delta_obs, ci_low, ci_high, p_value, significant, ci_halfwidth,
+    )
+
+    return {
+        "label_a": result_a["label"],
+        "label_b": result_b["label"],
+        "delta_mean": round(delta_obs, 4),
+        "delta_ci_low": round(ci_low, 4),
+        "delta_ci_high": round(ci_high, 4),
+        "p_value": round(p_value, 4),
+        "significant": significant,
+        "ci_halfwidth": ci_halfwidth,
+        "n_matches": n_matches,
+        "n_rows": len(merged),
+    }
 
 
 if __name__ == "__main__":

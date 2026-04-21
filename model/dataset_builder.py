@@ -117,7 +117,7 @@ def load_event_stats() -> pd.DataFrame:
     if not Path(p).exists():
         raise FileNotFoundError(
             f"event_stats.parquet no encontrado en {p}. "
-            "Ejecuta: python scripts/event_aggregator.py"
+            "Ejecuta: python scripts/ingestion/event_aggregator.py"
         )
     return pd.read_parquet(p)
 
@@ -127,7 +127,7 @@ def load_referees() -> pd.DataFrame:
     if not Path(p).exists():
         raise FileNotFoundError(
             f"referee_stats.parquet no encontrado en {p}. "
-            "Ejecuta: python scripts/referee_extractor.py"
+            "Ejecuta: python scripts/ingestion/referee_extractor.py"
         )
     return pd.read_parquet(p)
 

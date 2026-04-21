@@ -3,9 +3,10 @@ Odds Scheduler — auto-fetch de cuotas antes de cada partido
 ===========================================================
 Bucle ligero que:
   1. Lee `data/reference/liga_calendar_rows.csv`.
-  2. Filtra partidos scheduled de LaLiga en las próximas 4 horas.
+  2. Filtra partidos scheduled de LaLiga en un horizonte acorde a las ventanas
+     (p. ej. con −9h/−3h/−2h/−1h: hasta ~10 h desde ahora).
   3. Por cada partido, comprueba si estamos dentro de una ventana objetivo
-     (−3h ±5min, −2h ±5min, −1h ±5min).
+     (p. ej. −9h ±5min, −3h ±5min, −2h ±5min, −1h ±5min por defecto).
   4. Si sí, lanza `codere_scraper.py` (modo fetch) — sin Playwright.
   5. Mantiene un `state.json` con qué capturas ya hicimos para no duplicar.
   6. Duerme 5 minutos y repite.
@@ -14,9 +15,9 @@ Se puede dejar corriendo indefinidamente en background (terminal o
 Task Scheduler de Windows) — es barato en CPU/RAM.
 
 Uso:
-  python scripts/odds_scheduler.py            # bucle infinito cada 5 min
-  python scripts/odds_scheduler.py --once     # 1 iteración (útil para cron/task)
-  python scripts/odds_scheduler.py --windows 3,2,1   # personaliza ventanas (horas)
+  python scripts/odds/odds_scheduler.py            # bucle infinito cada 5 min
+  python scripts/odds/odds_scheduler.py --once     # 1 iteración (útil para cron/task)
+  python scripts/odds/odds_scheduler.py --windows 9,3,2,1   # personaliza ventanas (horas)
 """
 from __future__ import annotations
 
@@ -44,7 +45,7 @@ log = logging.getLogger("odds_scheduler")
 CONFIG = {
     "calendar_path": "data/reference/liga_calendar_rows.csv",
     "state_path": "data/reference/odds_scheduler_state.json",
-    "scraper_cmd": [sys.executable, "scripts/codere_scraper.py"],
+    "scraper_cmd": [sys.executable, "scripts/odds/codere_scraper.py"],
     "tz_local": "Europe/Madrid",  # kick-offs en hora peninsular
     "sleep_seconds": 300,         # 5 min
     "window_tolerance_min": 5,    # ±5 min sobre la hora objetivo
@@ -173,7 +174,7 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--once", action="store_true",
                         help="1 iteración y salir (para Task Scheduler/cron)")
-    parser.add_argument("--windows", default="3,2,1",
+    parser.add_argument("--windows", default="9,3,2,1",
                         help="Horas-antes-del-partido en que disparar (coma-separadas)")
     args = parser.parse_args()
 

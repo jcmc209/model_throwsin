@@ -21,15 +21,24 @@ data/whoscored_laliga/
 
 # ── Artefactos del modelo (derivados, regenerables con model/train.py) ──
 data/model/dataset.parquet
+data/model/dataset_match.parquet
 data/model/model_v1.joblib
-data/model/predictions_*.parquet
-# feature_importance.csv y metrics_v1.json SÍ se suben (livianos e informativos)
+data/model/model_v1_total.joblib
+data/model/model_q25.joblib
+data/model/model_q50.joblib
+data/model/model_q75.joblib
+data/model/optuna_study.db
+data/model/predictions/
+data/model/*.bak
+# feature_importance.csv, metrics_*.json, shap_importance.csv y cv_results.* SÍ se suben (livianos)
 
 # ── Datos de referencia voluminosos (se regeneran con weather_fetcher.py) ──
 data/reference/weather.parquet
 
 # ── Logs ──────────────────────────────────────────────────────
 *.log
+logs/
+!logs/.gitkeep
 
 # ── Jupyter checkpoints ───────────────────────────────────────
 .ipynb_checkpoints/

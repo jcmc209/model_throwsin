@@ -59,6 +59,9 @@ EVENT_FEATURE_SOURCE_COLS: list[str] = [
     "takeon_wide",       # regates en banda (r=+0.24)
     "balltouch_wide",    # toques en zona lateral (r=+0.33)
     "foul_wide",         # faltas en banda (r=+0.16)
+    # tempo / game-state histórico
+    "total_events",      # nº total de eventos del equipo (proxy de tempo/intensidad)
+    "leading_pct",       # fracción del partido en que el equipo iba ganando (r=-0.22 con throw_ins)
 ]
 
 ROLLING_WINDOWS: tuple[int, ...] = (3, 5, 10)
