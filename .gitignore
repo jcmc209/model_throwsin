@@ -49,4 +49,5 @@ playwright-report/
 test-results/
 
 # ── Infraestructura interna de Cursor ─────────────────────────
+openspec/
 .atl/

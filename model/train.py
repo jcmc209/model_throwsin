@@ -41,9 +41,10 @@ import joblib
 import lightgbm as lgb
 import numpy as np
 import pandas as pd
+from sklearn.linear_model import LinearRegression
 from sklearn.metrics import mean_absolute_error, mean_squared_error
 
-from model.features import TARGET_COL, get_feature_columns
+from model.features import SHAP_SELECTED_FEATURES, TARGET_COL, get_feature_columns
 
 # ─────────────────────────────────────────────────────────────
 # LOGGING
@@ -65,12 +66,40 @@ log = logging.getLogger("train")
 
 CONFIG = {
     "dataset_path": "data/model/dataset.parquet",
+    "match_dataset_path": "data/model/dataset_match.parquet",
     "model_path": "data/model/model_v1.joblib",
+    "model_total_path": "data/model/model_v1_total.joblib",
+    "share_coefs_path": "data/model/share_coefs.json",
     "metrics_path": "data/model/metrics_v1.json",
+    "metrics_bivariate_path": "data/model/metrics_bivariate.json",
     "feature_importance_path": "data/model/feature_importance.csv",
+    "feature_importance_total_path": "data/model/feature_importance_total.csv",
+    "cv_results_path": "data/model/cv_results.json",
+    "cv_results_csv_path": "data/model/cv_results.csv",
+    "current_per_team_mae": 4.3379,
     "train_seasons": ["2021/2022", "2022/2023", "2023/2024"],
     "val_seasons": ["2024/2025"],
     "test_seasons": ["2025/2026"],
+    "cv_folds": [
+        {
+            "name": "fold1_23-24",
+            "train_seasons": ["2021/2022", "2022/2023"],
+            "val_season": "2023/2024",
+            "is_partial": False,
+        },
+        {
+            "name": "fold2_24-25",
+            "train_seasons": ["2021/2022", "2022/2023", "2023/2024"],
+            "val_season": "2024/2025",
+            "is_partial": False,
+        },
+        {
+            "name": "fold3_25-26",
+            "train_seasons": ["2021/2022", "2022/2023", "2023/2024", "2024/2025"],
+            "val_season": "2025/2026",
+            "is_partial": True,
+        },
+    ],
     "baseline_target_mae": 4.84,
     "season_decay_weights": {
         "2021/2022": 0.6,
@@ -81,16 +110,18 @@ CONFIG = {
         "objective": "poisson",
         "metric": "mae",
         "learning_rate": 0.05,
-        "num_leaves": 31,
-        "min_child_samples": 20,
-        "feature_fraction": 0.9,
+        "num_leaves": 15,
+        "min_child_samples": 50,
+        "feature_fraction": 0.6,
         "bagging_fraction": 0.9,
         "bagging_freq": 5,
+        "reg_lambda": 1.0,
+        "reg_alpha": 0.1,
         "verbose": -1,
         "n_estimators": 2000,
         "random_state": 42,
     },
-    "early_stopping_rounds": 50,
+    "early_stopping_rounds": 100,
 }
 
 
@@ -224,39 +255,321 @@ def train_negbinom(train: pd.DataFrame, val: pd.DataFrame) -> dict:
 
 
 # ─────────────────────────────────────────────────────────────
+# BIVARIATE (Model1 total + share factor lineal)
+# ─────────────────────────────────────────────────────────────
+
+def load_match_dataset() -> pd.DataFrame:
+    df = pd.read_parquet(CONFIG["match_dataset_path"])
+    log.info("Match dataset cargado: %s", df.shape)
+    return df
+
+
+def split_temporal_match(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    train = df[df["season"].isin(CONFIG["train_seasons"])].copy()
+    val = df[df["season"].isin(CONFIG["val_seasons"])].copy()
+    test = df[df["season"].isin(CONFIG["test_seasons"])].copy()
+    assert train["match_id"].isin(val["match_id"]).sum() == 0
+    log.info("Match split — train=%d, val=%d, test=%d", len(train), len(val), len(test))
+    return train, val, test
+
+
+def get_match_feature_columns(df: pd.DataFrame) -> list[str]:
+    """Features para Model1: numéricas excepto IDs, target, targets auxiliares y flags no numéricos."""
+    exclude = {
+        "match_id", "season", "match_date",
+        "home_team_id", "away_team_id", "home_team_name", "away_team_name",
+        # Targets y diagnóstico (no se usan como features)
+        "throw_ins_total_match", "home_throw_ins_total", "away_throw_ins_total",
+        "share_home",
+    }
+    feats = []
+    for c in df.columns:
+        if c in exclude:
+            continue
+        if not np.issubdtype(df[c].dtype, np.number):
+            continue
+        feats.append(c)
+    return feats
+
+
+def train_lightgbm_total(
+    X_train: pd.DataFrame, y_train: pd.Series,
+    X_val: pd.DataFrame, y_val: pd.Series,
+    sample_weight: np.ndarray | None = None,
+) -> lgb.LGBMRegressor:
+    params = dict(CONFIG["lgb_params"])
+    model = lgb.LGBMRegressor(**params)
+    model.fit(
+        X_train, y_train,
+        sample_weight=sample_weight,
+        eval_set=[(X_val, y_val)],
+        eval_metric="mae",
+        callbacks=[
+            lgb.early_stopping(CONFIG["early_stopping_rounds"], verbose=False),
+            lgb.log_evaluation(period=0),
+        ],
+    )
+    return model
+
+
+def _compute_share_features(df: pd.DataFrame) -> pd.DataFrame:
+    """Construye las features del modelo de share: possession_diff y home_rolling_diff."""
+    out = pd.DataFrame(index=df.index)
+    out["possession_diff"] = (
+        df["home_rolling5_possession_pct"].fillna(df["home_rolling5_possession_pct"].median())
+        - df["away_rolling5_possession_pct"].fillna(df["away_rolling5_possession_pct"].median())
+    )
+    out["home_rolling_diff"] = (
+        df["home_rolling5_throw_ins_total"].fillna(df["home_rolling5_throw_ins_total"].median())
+        - df["away_rolling5_throw_ins_total"].fillna(df["away_rolling5_throw_ins_total"].median())
+    )
+    return out
+
+
+def fit_share_model(train: pd.DataFrame) -> tuple[LinearRegression, list[str]]:
+    """Regresión lineal share_home ~ possession_diff + home_rolling_diff."""
+    X = _compute_share_features(train)
+    y = train["share_home"].astype(float)
+    features = list(X.columns)
+    model = LinearRegression()
+    model.fit(X, y)
+    log.info(
+        "Share model — intercept=%.4f | coefs=%s",
+        model.intercept_,
+        {f: float(c) for f, c in zip(features, model.coef_)},
+    )
+    return model, features
+
+
+def _evaluate_bivariate(
+    val: pd.DataFrame,
+    pred_total: np.ndarray,
+    pred_share: np.ndarray,
+) -> dict:
+    """Calcula métricas bivariate + reconstrucción per-team MAE."""
+    total_mae = float(mean_absolute_error(val["throw_ins_total_match"], pred_total))
+    total_rmse = float(np.sqrt(mean_squared_error(val["throw_ins_total_match"], pred_total)))
+
+    share_mae = float(mean_absolute_error(val["share_home"], pred_share))
+
+    pred_home = pred_total * pred_share
+    pred_away = pred_total * (1.0 - pred_share)
+
+    y_home = val["home_throw_ins_total"].astype(float).to_numpy()
+    y_away = val["away_throw_ins_total"].astype(float).to_numpy()
+
+    per_team_mae = float(
+        (np.abs(pred_home - y_home).sum() + np.abs(pred_away - y_away).sum())
+        / (len(pred_home) + len(pred_away))
+    )
+    per_team_rmse = float(
+        np.sqrt(
+            (np.square(pred_home - y_home).sum() + np.square(pred_away - y_away).sum())
+            / (len(pred_home) + len(pred_away))
+        )
+    )
+
+    return {
+        "total_mae": total_mae,
+        "total_rmse": total_rmse,
+        "share_mae": share_mae,
+        "share_pred_mean": float(np.mean(pred_share)),
+        "share_pred_std": float(np.std(pred_share)),
+        "share_actual_mean": float(val["share_home"].mean()),
+        "share_actual_std": float(val["share_home"].std()),
+        "per_team_mae_reconstructed": per_team_mae,
+        "per_team_rmse_reconstructed": per_team_rmse,
+    }
+
+
+def main_bivariate(weights_mode: str = "both") -> None:
+    log.info("=== Modo BIVARIATE: Model1(total) + share lineal ===")
+    df = load_match_dataset()
+    train, val, _test = split_temporal_match(df)
+
+    feature_cols = get_match_feature_columns(df)
+    log.info("Features match-level: %d", len(feature_cols))
+
+    X_train = train[feature_cols].astype(float)
+    y_train = train["throw_ins_total_match"].astype(float)
+    X_val = val[feature_cols].astype(float)
+    y_val = val["throw_ins_total_match"].astype(float)
+
+    # Sample weights: se aplica el mismo esquema que en modo per-team
+    schemes = ["uniform", "decay"] if weights_mode == "both" else [weights_mode]
+
+    total_results: dict[str, dict] = {}
+    total_models: dict[str, lgb.LGBMRegressor] = {}
+    for scheme in schemes:
+        log.info("Entrenando Model1 (total) weights=%s ...", scheme)
+        sw = None
+        if scheme == "decay":
+            sw = train["season"].map(CONFIG["season_decay_weights"]).fillna(1.0).to_numpy()
+        model = train_lightgbm_total(X_train, y_train, X_val, y_val, sw)
+        pred_val = model.predict(X_val)
+        pred_train = model.predict(X_train)
+        total_results[scheme] = {
+            "total_mae": float(mean_absolute_error(y_val, pred_val)),
+            "total_rmse": float(np.sqrt(mean_squared_error(y_val, pred_val))),
+            "train_mae": float(mean_absolute_error(y_train, pred_train)),
+            "best_iteration": int(model.best_iteration_ or model.n_estimators),
+        }
+        total_results[scheme]["train_val_gap"] = round(
+            total_results[scheme]["train_mae"] / total_results[scheme]["total_mae"], 4
+        )
+        log.info(
+            "  weights=%s → train_MAE %.4f | total_MAE val %.4f | gap %.4f | best_iter %d",
+            scheme, total_results[scheme]["train_mae"],
+            total_results[scheme]["total_mae"],
+            total_results[scheme]["train_val_gap"],
+            total_results[scheme]["best_iteration"],
+        )
+        total_models[scheme] = model
+
+    best_scheme = min(total_models, key=lambda s: total_results[s]["total_mae"])
+    best_total_model = total_models[best_scheme]
+    log.info("Mejor esquema Model1: %s (total MAE %.4f)",
+             best_scheme, total_results[best_scheme]["total_mae"])
+
+    # Share factor lineal
+    log.info("Entrenando share factor (regresión lineal) ...")
+    share_model, share_features = fit_share_model(train)
+
+    X_share_val = _compute_share_features(val)
+    pred_share_val = share_model.predict(X_share_val)
+    # Clip a [0, 1] para evitar predicciones fuera de rango (lineal puede salirse)
+    pred_share_val = np.clip(pred_share_val, 0.0, 1.0)
+
+    # Sanity: mean pred_share ≈ mean real (≈ 0.51)
+    log.info(
+        "share val — pred mean %.4f (std %.4f) vs real mean %.4f (std %.4f)",
+        pred_share_val.mean(), pred_share_val.std(),
+        val["share_home"].mean(), val["share_home"].std(),
+    )
+
+    # Reconstrucción bivariate
+    pred_total_val = best_total_model.predict(X_val)
+    biv_metrics = _evaluate_bivariate(val, pred_total_val, pred_share_val)
+    biv_metrics["best_total_scheme"] = best_scheme
+    biv_metrics["total_train_mae"] = total_results[best_scheme]["train_mae"]
+    biv_metrics["total_train_val_gap"] = total_results[best_scheme]["train_val_gap"]
+    biv_metrics["total_best_iteration"] = total_results[best_scheme]["best_iteration"]
+    biv_metrics["current_per_team_mae"] = CONFIG["current_per_team_mae"]
+    biv_metrics["beats_current"] = (
+        biv_metrics["per_team_mae_reconstructed"] < CONFIG["current_per_team_mae"]
+    )
+
+    decision = "MEJORA" if biv_metrics["beats_current"] else "NO MEJORA"
+    log.info(
+        "=> per_team_MAE reconstruido %.4f vs current %.4f → [%s]",
+        biv_metrics["per_team_mae_reconstructed"],
+        CONFIG["current_per_team_mae"],
+        decision,
+    )
+
+    # Persistencia
+    Path(CONFIG["model_total_path"]).parent.mkdir(parents=True, exist_ok=True)
+
+    total_artifact = {
+        "model": best_total_model,
+        "version": "v1_total",
+        "trained_at": datetime.utcnow().isoformat(timespec="seconds"),
+        "features": feature_cols,
+        "params": dict(CONFIG["lgb_params"]),
+        "val_total_mae": total_results[best_scheme]["total_mae"],
+        "val_total_rmse": total_results[best_scheme]["total_rmse"],
+        "sample_weights_scheme": best_scheme,
+        "train_seasons": CONFIG["train_seasons"],
+        "val_seasons": CONFIG["val_seasons"],
+        "best_iteration": total_results[best_scheme]["best_iteration"],
+    }
+    joblib.dump(total_artifact, CONFIG["model_total_path"])
+    log.info("Model1 guardado: %s", CONFIG["model_total_path"])
+
+    share_coefs = {
+        "intercept": float(share_model.intercept_),
+        "coefs": {f: float(c) for f, c in zip(share_features, share_model.coef_)},
+        "features": share_features,
+        "trained_on": "+".join(CONFIG["train_seasons"]),
+        "clip_range": [0.0, 1.0],
+    }
+    with open(CONFIG["share_coefs_path"], "w", encoding="utf-8") as f:
+        json.dump(share_coefs, f, indent=2, ensure_ascii=False)
+    log.info("Share coefs guardados: %s", CONFIG["share_coefs_path"])
+
+    def _to_native(obj):
+        if isinstance(obj, (np.bool_,)):
+            return bool(obj)
+        if isinstance(obj, (np.integer,)):
+            return int(obj)
+        if isinstance(obj, (np.floating,)):
+            return float(obj)
+        raise TypeError(f"No serializable: {type(obj).__name__}")
+
+    metrics_out = {
+        "trained_at": total_artifact["trained_at"],
+        "mode": "bivariate",
+        "n_features": len(feature_cols),
+        "train_rows": len(train),
+        "val_rows": len(val),
+        "total_results_by_scheme": total_results,
+        "bivariate": biv_metrics,
+        "share_coefs": share_coefs,
+    }
+    with open(CONFIG["metrics_bivariate_path"], "w", encoding="utf-8") as f:
+        json.dump(metrics_out, f, indent=2, ensure_ascii=False, default=_to_native)
+    log.info("Métricas bivariate guardadas: %s", CONFIG["metrics_bivariate_path"])
+
+    # Feature importance del Model1
+    fi = pd.DataFrame({
+        "feature": feature_cols,
+        "importance_gain": best_total_model.booster_.feature_importance(importance_type="gain"),
+        "importance_split": best_total_model.booster_.feature_importance(importance_type="split"),
+    }).sort_values("importance_gain", ascending=False)
+    fi.to_csv(CONFIG["feature_importance_total_path"], index=False)
+    log.info("Feature importance Model1 guardado: %s", CONFIG["feature_importance_total_path"])
+    log.info("Top 10 features Model1 por gain:\n%s", fi.head(10).to_string(index=False))
+
+
+# ─────────────────────────────────────────────────────────────
 # MAIN
 # ─────────────────────────────────────────────────────────────
 
-def main(weights_mode: str = "both") -> None:
+def main(weights_mode: str = "both", features_mode: str = "shap30") -> None:
     df = load_dataset()
     train, val, test = split_temporal(df)
 
     baseline_mae = baseline_team_mean(train, val)
 
-    feature_cols = get_feature_columns(df)
-    # Excluimos columnas que podrían ser leakage si aparecieran (defensa extra)
-    leakage_suspect = [c for c in feature_cols if c in train.columns and c.startswith(
-        ("shots_", "passes_accurate", "passes_key", "pass_success", "tackles_",
-         "interceptions", "clearances", "dribbles_", "aerials_won", "aerials_offensive",
-         "aerials_defensive", "aerial_success_pct", "touches_total", "corners_accurate",
-         "throw_ins_accurate", "throw_in_accuracy", "dispossessed", "dribble_success_pct",
-         "dribbled_past", "shots_on_post", "tackle_success_pct", "fouls_committed",
-         "attendance")
-    )]
-    # NOTA: columnas base del partido actual (p.ej. corners_total, passes_total) se
-    # filtran aquí porque son estadísticas post-partido, NO pre-match.
-    raw_match_stats = [
-        "throw_ins_accurate", "throw_in_accuracy_pct",
-        "shots_total", "shots_on_target", "shots_off_target", "shots_blocked", "shots_on_post",
-        "passes_total", "passes_accurate", "passes_key", "pass_success_pct",
-        "aerials_total", "aerials_won", "aerials_offensive", "aerials_defensive", "aerial_success_pct",
-        "tackles_total", "tackles_successful", "tackles_unsuccessful", "tackle_success_pct",
-        "dribbled_past", "dribbles_won", "dribbles_attempted", "dribbles_lost", "dribble_success_pct",
-        "interceptions", "clearances", "fouls_committed", "dispossessed",
-        "corners_total", "corners_accurate", "touches_total", "possession_pct", "attendance",
-    ]
-    feature_cols = [c for c in feature_cols if c not in raw_match_stats]
-    log.info("Features tras filtrar raw match stats: %d", len(feature_cols))
+    if features_mode == "shap30":
+        missing = [f for f in SHAP_SELECTED_FEATURES if f not in df.columns]
+        if missing:
+            raise ValueError(f"SHAP_SELECTED_FEATURES contiene columnas ausentes: {missing}")
+        feature_cols = SHAP_SELECTED_FEATURES
+        log.info("Modo shap30: usando %d features seleccionadas por SHAP", len(feature_cols))
+    else:
+        feature_cols = get_feature_columns(df)
+        # Excluimos columnas que podrían ser leakage si aparecieran (defensa extra)
+        leakage_suspect = [c for c in feature_cols if c in train.columns and c.startswith(
+            ("shots_", "passes_accurate", "passes_key", "pass_success", "tackles_",
+             "interceptions", "clearances", "dribbles_", "aerials_won", "aerials_offensive",
+             "aerials_defensive", "aerial_success_pct", "touches_total", "corners_accurate",
+             "throw_ins_accurate", "throw_in_accuracy", "dispossessed", "dribble_success_pct",
+             "dribbled_past", "shots_on_post", "tackle_success_pct", "fouls_committed",
+             "attendance")
+        )]
+        raw_match_stats = [
+            "throw_ins_accurate", "throw_in_accuracy_pct",
+            "shots_total", "shots_on_target", "shots_off_target", "shots_blocked", "shots_on_post",
+            "passes_total", "passes_accurate", "passes_key", "pass_success_pct",
+            "aerials_total", "aerials_won", "aerials_offensive", "aerials_defensive", "aerial_success_pct",
+            "tackles_total", "tackles_successful", "tackles_unsuccessful", "tackle_success_pct",
+            "dribbled_past", "dribbles_won", "dribbles_attempted", "dribbles_lost", "dribble_success_pct",
+            "interceptions", "clearances", "fouls_committed", "dispossessed",
+            "corners_total", "corners_accurate", "touches_total", "possession_pct", "attendance",
+        ]
+        feature_cols = [c for c in feature_cols if c not in raw_match_stats]
+        log.info("Modo all: features tras filtrar raw match stats: %d", len(feature_cols))
 
     X_train = train[feature_cols]
     y_train = train[TARGET_COL]
@@ -274,8 +587,16 @@ def main(weights_mode: str = "both") -> None:
         pred = model.predict(X_val)
         metrics = evaluate(y_val, pred, {"team": val["team_id"], "season": val["season"]})
         metrics["best_iteration"] = int(model.best_iteration_ or model.n_estimators)
-        log.info("  weights=%s → MAE %.4f | RMSE %.4f | best_iter %d",
-                 scheme, metrics["mae"], metrics["rmse"], metrics["best_iteration"])
+
+        train_pred = model.predict(X_train)
+        metrics["train_mae"] = float(mean_absolute_error(y_train, train_pred))
+        metrics["train_val_gap"] = round(metrics["train_mae"] / metrics["mae"], 4)
+
+        log.info(
+            "  weights=%s → train_MAE %.4f | val_MAE %.4f | gap %.4f | best_iter %d",
+            scheme, metrics["train_mae"], metrics["mae"],
+            metrics["train_val_gap"], metrics["best_iteration"],
+        )
         results[f"lgbm_{scheme}"] = metrics
         models[scheme] = model
 
@@ -327,6 +648,8 @@ def main(weights_mode: str = "both") -> None:
         "best_model": f"lgbm_{best_scheme}",
         "beats_baseline": success,
         "n_features": len(feature_cols),
+        "n_features_used": len(feature_cols),
+        "feature_selection_method": features_mode,
         "train_rows": len(train),
         "val_rows": len(val),
         "results": results,
@@ -354,6 +677,201 @@ def main(weights_mode: str = "both") -> None:
     log.info("Top 10 features por gain:\n%s", fi.head(10).to_string(index=False))
 
 
+# ─────────────────────────────────────────────────────────────
+# WALK-FORWARD CROSS-VALIDATION (diagnóstico)
+# ─────────────────────────────────────────────────────────────
+
+def _build_decay_weights(train_seasons: list[str]) -> dict[str, float]:
+    """
+    Devuelve pesos por temporada: la más reciente = 1.0, cada anterior decae 0.2.
+    Mínimo clip 0.2 para que las temporadas más antiguas sigan contando.
+    Uso agnóstico del fold (en vez del `season_decay_weights` hardcodeado).
+    """
+    seasons_sorted = sorted(train_seasons)
+    weights = {}
+    n = len(seasons_sorted)
+    for i, s in enumerate(seasons_sorted):
+        w = 1.0 - 0.2 * (n - 1 - i)
+        weights[s] = max(w, 0.2)
+    return weights
+
+
+def _decay_sample_weights(train: pd.DataFrame, weights_map: dict[str, float]) -> np.ndarray:
+    return train["season"].map(weights_map).fillna(1.0).to_numpy()
+
+
+def run_walk_forward_cv(features_mode: str = "shap30") -> dict:
+    """
+    Ejecuta walk-forward CV de 3 folds (expanding window) como diagnóstico.
+    No sobrescribe `model_v1.joblib` ni `metrics_v1.json`.
+    """
+    df = load_dataset()
+
+    if features_mode == "shap30":
+        missing = [f for f in SHAP_SELECTED_FEATURES if f not in df.columns]
+        if missing:
+            raise ValueError(f"SHAP_SELECTED_FEATURES contiene columnas ausentes: {missing}")
+        feature_cols = SHAP_SELECTED_FEATURES
+    else:
+        feature_cols = get_feature_columns(df)
+    log.info("CV — features_mode=%s, n_features=%d", features_mode, len(feature_cols))
+
+    folds_out: list[dict] = []
+    for fold_cfg in CONFIG["cv_folds"]:
+        name = fold_cfg["name"]
+        train_seasons = fold_cfg["train_seasons"]
+        val_season = fold_cfg["val_season"]
+        is_partial = fold_cfg["is_partial"]
+
+        train = df[df["season"].isin(train_seasons)].copy()
+        val = df[df["season"] == val_season].copy()
+
+        if train.empty or val.empty:
+            log.warning("Fold %s saltado (train=%d, val=%d)", name, len(train), len(val))
+            continue
+
+        log.info(
+            "=== Fold %s — train=%s (%d filas) | val=%s (%d filas)%s ===",
+            name, "+".join(train_seasons), len(train), val_season, len(val),
+            " [PARTIAL]" if is_partial else "",
+        )
+
+        baseline_mae = baseline_team_mean(train, val)
+
+        X_train = train[feature_cols]
+        y_train = train[TARGET_COL]
+        X_val = val[feature_cols]
+        y_val = val[TARGET_COL]
+
+        decay_map = _build_decay_weights(train_seasons)
+        sw = _decay_sample_weights(train, decay_map)
+
+        model = train_lightgbm(X_train, y_train, X_val, y_val, sw)
+        val_pred = model.predict(X_val)
+        train_pred = model.predict(X_train)
+
+        val_mae = float(mean_absolute_error(y_val, val_pred))
+        val_rmse = float(np.sqrt(mean_squared_error(y_val, val_pred)))
+        train_mae = float(mean_absolute_error(y_train, train_pred))
+        gap = round(train_mae / val_mae, 4) if val_mae > 0 else 0.0
+        best_iter = int(model.best_iteration_ or model.n_estimators)
+
+        log.info(
+            "  %s → val_MAE %.4f | val_RMSE %.4f | train_MAE %.4f | gap %.4f | "
+            "best_iter %d | baseline %.4f",
+            name, val_mae, val_rmse, train_mae, gap, best_iter, baseline_mae,
+        )
+
+        folds_out.append({
+            "name": name,
+            "train_seasons": train_seasons,
+            "val_season": val_season,
+            "is_partial": is_partial,
+            "n_train": int(len(train)),
+            "n_val": int(len(val)),
+            "val_mae": round(val_mae, 4),
+            "val_rmse": round(val_rmse, 4),
+            "train_mae": round(train_mae, 4),
+            "train_val_gap": gap,
+            "best_iteration": best_iter,
+            "baseline_mae": round(float(baseline_mae), 4),
+            "decay_weights": {k: round(v, 2) for k, v in decay_map.items()},
+        })
+
+    # Agregados solo sobre folds completos
+    complete = [f for f in folds_out if not f["is_partial"]]
+    maes = [f["val_mae"] for f in complete]
+    if maes:
+        mean_mae = float(np.mean(maes))
+        std_mae = float(np.std(maes, ddof=0))
+        min_mae = float(np.min(maes))
+        max_mae = float(np.max(maes))
+        rng = round(max_mae - min_mae, 4)
+    else:
+        mean_mae = std_mae = min_mae = max_mae = rng = 0.0
+
+    aggregated = {
+        "n_complete_folds": len(complete),
+        "mean_val_mae": round(mean_mae, 4),
+        "std_val_mae": round(std_mae, 4),
+        "min_val_mae": round(min_mae, 4),
+        "max_val_mae": round(max_mae, 4),
+        "range_val_mae": rng,
+    }
+
+    significant_delta = round(2 * std_mae, 4)
+    log.info(
+        "CV AGREGADO — mean %.4f | std %.4f | range %.4f (sobre %d folds completos)",
+        mean_mae, std_mae, rng, len(complete),
+    )
+    log.info(
+        "→ std_val_MAE = %.4f → cambios con delta < %.4f son ruido estadístico "
+        "(no significativos a 2σ)", std_mae, significant_delta,
+    )
+
+    out = {
+        "run_at": datetime.utcnow().isoformat() + "Z",
+        "features_mode": features_mode,
+        "n_features": len(feature_cols),
+        "lgb_params": dict(CONFIG["lgb_params"]),
+        "early_stopping_rounds": CONFIG["early_stopping_rounds"],
+        "folds": folds_out,
+        "aggregated": aggregated,
+        "significant_delta_2sigma": significant_delta,
+    }
+
+    def _to_native(obj):
+        if isinstance(obj, (np.bool_,)):
+            return bool(obj)
+        if isinstance(obj, (np.integer,)):
+            return int(obj)
+        if isinstance(obj, (np.floating,)):
+            return float(obj)
+        raise TypeError(f"No serializable: {type(obj).__name__}")
+
+    out_dir = Path(CONFIG["cv_results_path"]).parent
+    out_dir.mkdir(parents=True, exist_ok=True)
+    with open(CONFIG["cv_results_path"], "w", encoding="utf-8") as f:
+        json.dump(out, f, indent=2, ensure_ascii=False, default=_to_native)
+    log.info("CV results guardados: %s", CONFIG["cv_results_path"])
+
+    # CSV legible: 1 fila por fold + fila final con agregados
+    rows = []
+    for f_ in folds_out:
+        rows.append({
+            "fold": f_["name"],
+            "train_seasons": "+".join(f_["train_seasons"]),
+            "val_season": f_["val_season"],
+            "is_partial": f_["is_partial"],
+            "n_train": f_["n_train"],
+            "n_val": f_["n_val"],
+            "val_mae": f_["val_mae"],
+            "val_rmse": f_["val_rmse"],
+            "train_mae": f_["train_mae"],
+            "train_val_gap": f_["train_val_gap"],
+            "best_iteration": f_["best_iteration"],
+            "baseline_mae": f_["baseline_mae"],
+        })
+    rows.append({
+        "fold": "AGGREGATED (complete only)",
+        "train_seasons": "",
+        "val_season": "",
+        "is_partial": "",
+        "n_train": "",
+        "n_val": "",
+        "val_mae": aggregated["mean_val_mae"],
+        "val_rmse": "",
+        "train_mae": "",
+        "train_val_gap": "",
+        "best_iteration": "",
+        "baseline_mae": f"std={aggregated['std_val_mae']} range={aggregated['range_val_mae']}",
+    })
+    pd.DataFrame(rows).to_csv(CONFIG["cv_results_csv_path"], index=False)
+    log.info("CV CSV guardado: %s", CONFIG["cv_results_csv_path"])
+
+    return out
+
+
 if __name__ == "__main__":
     sys.stdout.reconfigure(encoding="utf-8")
     parser = argparse.ArgumentParser(description="Train throw-in predictor")
@@ -363,5 +881,28 @@ if __name__ == "__main__":
         default="both",
         help="Esquema de sample weights a probar",
     )
+    parser.add_argument(
+        "--target",
+        choices=["per-team", "bivariate"],
+        default="per-team",
+        help="Target del modelo: per-team (current) o bivariate (Model1 total + share)",
+    )
+    parser.add_argument(
+        "--features",
+        choices=["all", "shap30"],
+        default="shap30",
+        help="Selección de features: shap30 (top-30 SHAP, default) o all (101 features)",
+    )
+    parser.add_argument(
+        "--mode",
+        choices=["train", "cv"],
+        default="train",
+        help="train: entrena y guarda model_v1.joblib; cv: walk-forward diagnóstico (no toca artefactos de producción)",
+    )
     args = parser.parse_args()
-    main(weights_mode=args.weights)
+    if args.mode == "cv":
+        run_walk_forward_cv(features_mode=args.features)
+    elif args.target == "bivariate":
+        main_bivariate(weights_mode=args.weights)
+    else:
+        main(weights_mode=args.weights, features_mode=args.features)

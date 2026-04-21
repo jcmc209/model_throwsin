@@ -962,6 +962,8 @@ def _build_team_stats(raw: dict, season: str) -> pd.DataFrame:
             "ht_score":              mcd.get("htScore", ""),
             "venue":                 mcd.get("venueName", ""),
             "attendance":            mcd.get("attendance", 0),
+            "referee_id":            (mcd.get("referee") or {}).get("officialId"),
+            "referee_name":          (mcd.get("referee") or {}).get("name", ""),
             # Saques de banda (variable objetivo)
             "throw_ins_total":       t_ti,
             "throw_ins_accurate":    t_ti_ok,

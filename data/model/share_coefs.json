@@ -1,0 +1,16 @@
+{
+  "intercept": 0.5151414781392702,
+  "coefs": {
+    "possession_diff": 0.0016855844829495657,
+    "home_rolling_diff": -0.0004649955898042979
+  },
+  "features": [
+    "possession_diff",
+    "home_rolling_diff"
+  ],
+  "trained_on": "2021/2022+2022/2023+2023/2024",
+  "clip_range": [
+    0.0,
+    1.0
+  ]
+}

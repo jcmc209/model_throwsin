@@ -1,0 +1,5 @@
+fold,train_seasons,val_season,is_partial,n_train,n_val,val_mae,val_rmse,train_mae,train_val_gap,best_iteration,baseline_mae
+fold1_23-24,2021/2022+2022/2023,2023/2024,False,1518,760,4.0698,5.0772,3.0374,0.7463,152,4.7571
+fold2_24-25,2021/2022+2022/2023+2023/2024,2024/2025,False,2278,760,3.9282,5.0093,3.0576,0.7784,213,4.7698
+fold3_25-26,2021/2022+2022/2023+2023/2024+2024/2025,2025/2026,True,3038,584,3.773,4.7795,3.4937,0.926,123,4.5883
+AGGREGATED (complete only),,,,,,3.999,,,,,std=0.0708 range=0.1416

@@ -1,0 +1,101 @@
+{
+  "run_at": "2026-04-20T21:42:58.453265Z",
+  "features_mode": "shap30",
+  "n_features": 35,
+  "lgb_params": {
+    "objective": "poisson",
+    "metric": "mae",
+    "learning_rate": 0.05,
+    "num_leaves": 15,
+    "min_child_samples": 50,
+    "feature_fraction": 0.6,
+    "bagging_fraction": 0.9,
+    "bagging_freq": 5,
+    "reg_lambda": 1.0,
+    "reg_alpha": 0.1,
+    "verbose": -1,
+    "n_estimators": 2000,
+    "random_state": 42
+  },
+  "early_stopping_rounds": 100,
+  "folds": [
+    {
+      "name": "fold1_23-24",
+      "train_seasons": [
+        "2021/2022",
+        "2022/2023"
+      ],
+      "val_season": "2023/2024",
+      "is_partial": false,
+      "n_train": 1518,
+      "n_val": 760,
+      "val_mae": 4.0698,
+      "val_rmse": 5.0772,
+      "train_mae": 3.0374,
+      "train_val_gap": 0.7463,
+      "best_iteration": 152,
+      "baseline_mae": 4.7571,
+      "decay_weights": {
+        "2021/2022": 0.8,
+        "2022/2023": 1.0
+      }
+    },
+    {
+      "name": "fold2_24-25",
+      "train_seasons": [
+        "2021/2022",
+        "2022/2023",
+        "2023/2024"
+      ],
+      "val_season": "2024/2025",
+      "is_partial": false,
+      "n_train": 2278,
+      "n_val": 760,
+      "val_mae": 3.9282,
+      "val_rmse": 5.0093,
+      "train_mae": 3.0576,
+      "train_val_gap": 0.7784,
+      "best_iteration": 213,
+      "baseline_mae": 4.7698,
+      "decay_weights": {
+        "2021/2022": 0.6,
+        "2022/2023": 0.8,
+        "2023/2024": 1.0
+      }
+    },
+    {
+      "name": "fold3_25-26",
+      "train_seasons": [
+        "2021/2022",
+        "2022/2023",
+        "2023/2024",
+        "2024/2025"
+      ],
+      "val_season": "2025/2026",
+      "is_partial": true,
+      "n_train": 3038,
+      "n_val": 584,
+      "val_mae": 3.773,
+      "val_rmse": 4.7795,
+      "train_mae": 3.4937,
+      "train_val_gap": 0.926,
+      "best_iteration": 123,
+      "baseline_mae": 4.5883,
+      "decay_weights": {
+        "2021/2022": 0.4,
+        "2022/2023": 0.6,
+        "2023/2024": 0.8,
+        "2024/2025": 1.0
+      }
+    }
+  ],
+  "aggregated": {
+    "n_complete_folds": 2,
+    "mean_val_mae": 3.999,
+    "std_val_mae": 0.0708,
+    "min_val_mae": 3.9282,
+    "max_val_mae": 4.0698,
+    "range_val_mae": 0.1416
+  },
+  "significant_delta_2sigma": 0.1416
+}

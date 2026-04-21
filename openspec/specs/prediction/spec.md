@@ -52,9 +52,49 @@ El sistema MUST devolver las predicciones como DataFrame con columnas: `event_id
 
 ### Requirement: Modelo cargado desde disco
 
-El sistema MUST cargar el modelo serializado en `data/model/model_v1.pkl` y usar su versión sin reentrenar.
+El sistema MUST cargar el modelo serializado en `data/model/model_v1.joblib` y usar su versión sin reentrenar.
 
 #### Scenario: Modelo faltante
-- GIVEN no existe `model_v1.pkl`
+- GIVEN no existe `model_v1.joblib`
 - WHEN se ejecuta `predict.py`
 - THEN aborta con mensaje claro indicando ejecutar `train.py` primero
+
+### Requirement: Modo cuantil de inferencia (Q25/Q50/Q75)
+
+El sistema MAY generar predicciones con intervalos de confianza usando `--mode quantile`.
+Carga los tres modelos cuantil y produce columnas `pred_q25/q50/q75` por equipo y totales
+`total_q25/q50/q75` a nivel partido con clip anti-cruce aplicado.
+
+#### Scenario: Inferencia cuantil activada
+- GIVEN los modelos `model_q{25,50,75}.joblib` existen en `data/model/`
+- WHEN se ejecuta `python -m model.predict --mode quantile --matchday next`
+- THEN se aplica el mismo pipeline de features que el modo estándar
+- AND se generan predicciones Q25/Q50/Q75 por equipo; se agregan a nivel partido
+- AND se aplica clip: `total_Q25 ≤ total_Q50 ≤ total_Q75` para evitar cruces
+- AND se guardan en `data/model/predictions_quantile_<YYYYMMDD>.parquet`
+- AND se imprime tabla con `total_q25`, `total_q50`, `total_q75` por partido
+
+#### Scenario: Estrategia de apuesta derivada
+- GIVEN predicciones cuantiles para un partido y una línea de apuesta L
+- WHEN se compara `total_Q25` y `total_Q75` con L
+- THEN si `total_Q25 > L` → señal OVER (75% confianza histórica)
+- AND si `total_Q75 < L` → señal UNDER (75% confianza histórica)
+- AND si `total_Q25 ≤ L ≤ total_Q75` → incertidumbre alta, no apostar
+
+#### Scenario: Modelos cuantil faltantes
+- GIVEN no existen los archivos `model_q*.joblib`
+- WHEN se ejecuta con `--mode quantile`
+- THEN aborta con mensaje claro indicando ejecutar `python -m model.train_quantile` primero
+
+### Requirement: Modo bivariate de inferencia (experimental)
+
+El sistema MAY generar predicciones usando el pipeline bivariate (`--bivariate`) cargando `model_v1_total.joblib` + `share_coefs.json`.
+
+#### Scenario: Inferencia bivariate activada
+- GIVEN el flag `--bivariate` en la CLI
+- WHEN se ejecuta `python -m model.predict --bivariate --matchday next`
+- THEN se construyen las features en formato match-level (pivote home/away en memoria)
+- AND se predice `pred_total` con Model1 y `pred_share` con el share factor lineal
+- AND `pred_home = pred_total × pred_share`, `pred_away = pred_total × (1 - pred_share)`
+- AND el output tiene el mismo schema que el modo per-team: `match_id`, `match_date`, `home_team`, `away_team`, `pred_throw_ins_home`, `pred_throw_ins_away`, `pred_throw_ins_total`
+- AND se guarda en `data/model/predictions_bivariate_<YYYYMMDD>.parquet`

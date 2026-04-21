@@ -1,0 +1,56 @@
+{
+  "trained_at": "2026-04-20T20:01:22",
+  "mode": "bivariate",
+  "n_features": 184,
+  "train_rows": 1139,
+  "val_rows": 380,
+  "total_results_by_scheme": {
+    "uniform": {
+      "total_mae": 6.7574245054548845,
+      "total_rmse": 8.37570016138713,
+      "train_mae": 4.224073905665433,
+      "best_iteration": 183,
+      "train_val_gap": 0.6251
+    },
+    "decay": {
+      "total_mae": 6.759931164394143,
+      "total_rmse": 8.377813526573574,
+      "train_mae": 4.499378283110258,
+      "best_iteration": 155,
+      "train_val_gap": 0.6656
+    }
+  },
+  "bivariate": {
+    "total_mae": 6.7574245054548845,
+    "total_rmse": 8.37570016138713,
+    "share_mae": 0.07373363745708125,
+    "share_pred_mean": 0.5147215495775309,
+    "share_pred_std": 0.013175031443379922,
+    "share_actual_mean": 0.511678373966556,
+    "share_actual_std": 0.09364139979778974,
+    "per_team_mae_reconstructed": 4.397018670509265,
+    "per_team_rmse_reconstructed": 5.531898691883634,
+    "best_total_scheme": "uniform",
+    "total_train_mae": 4.224073905665433,
+    "total_train_val_gap": 0.6251,
+    "total_best_iteration": 183,
+    "current_per_team_mae": 4.3379,
+    "beats_current": false
+  },
+  "share_coefs": {
+    "intercept": 0.5151414781392702,
+    "coefs": {
+      "possession_diff": 0.0016855844829495657,
+      "home_rolling_diff": -0.0004649955898042979
+    },
+    "features": [
+      "possession_diff",
+      "home_rolling_diff"
+    ],
+    "trained_on": "2021/2022+2022/2023+2023/2024",
+    "clip_range": [
+      0.0,
+      1.0
+    ]
+  }
+}

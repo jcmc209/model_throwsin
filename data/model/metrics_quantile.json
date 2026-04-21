@@ -1,0 +1,103 @@
+{
+  "trained_at": "2026-04-20T22:20:17.293997Z",
+  "features_mode": "shap30",
+  "n_features": 37,
+  "train_seasons": [
+    "2021/2022",
+    "2022/2023",
+    "2023/2024"
+  ],
+  "val_seasons": [
+    "2024/2025"
+  ],
+  "quantile_metrics": {
+    "Q25": {
+      "alpha": 0.25,
+      "pinball_loss": 1.5171,
+      "pinball_loss_baseline": 2.3719,
+      "beats_baseline": true,
+      "best_iteration": 139
+    },
+    "Q50": {
+      "alpha": 0.5,
+      "pinball_loss": 2.0095,
+      "pinball_loss_baseline": 2.3719,
+      "beats_baseline": true,
+      "best_iteration": 216
+    },
+    "Q75": {
+      "alpha": 0.75,
+      "pinball_loss": 1.6774,
+      "pinball_loss_baseline": 2.3719,
+      "beats_baseline": true,
+      "best_iteration": 114
+    }
+  },
+  "calibration": {
+    "coverage_individual_q25_q75": 0.4487,
+    "coverage_match_q25_q75": 0.3921,
+    "mae_q50_per_team": 4.0189,
+    "mae_q50_match": 8.8544,
+    "lines_accuracy": {
+      "35.5": {
+        "model_acc_q50": 0.5421,
+        "base_over_rate": 0.6368,
+        "advantage_pp": -9.47,
+        "strong_over_n": 102,
+        "strong_over_hit_rate": 0.6373,
+        "strong_under_n": 7,
+        "strong_under_hit_rate": 0.1429
+      },
+      "37.5": {
+        "model_acc_q50": 0.5053,
+        "base_over_rate": 0.5816,
+        "advantage_pp": -7.63,
+        "strong_over_n": 46,
+        "strong_over_hit_rate": 0.6739,
+        "strong_under_n": 26,
+        "strong_under_hit_rate": 0.4231
+      },
+      "39.5": {
+        "model_acc_q50": 0.5263,
+        "base_over_rate": 0.4947,
+        "advantage_pp": 2.11,
+        "strong_over_n": 21,
+        "strong_over_hit_rate": 0.7619,
+        "strong_under_n": 70,
+        "strong_under_hit_rate": 0.4571
+      },
+      "41.5": {
+        "model_acc_q50": 0.5316,
+        "base_over_rate": 0.4211,
+        "advantage_pp": -4.74,
+        "strong_over_n": 5,
+        "strong_over_hit_rate": 0.6,
+        "strong_under_n": 122,
+        "strong_under_hit_rate": 0.5984
+      },
+      "43.5": {
+        "model_acc_q50": 0.6,
+        "base_over_rate": 0.3526,
+        "advantage_pp": -4.74,
+        "strong_over_n": 0,
+        "strong_over_hit_rate": null,
+        "strong_under_n": 182,
+        "strong_under_hit_rate": 0.6538
+      },
+      "45.5": {
+        "model_acc_q50": 0.6895,
+        "base_over_rate": 0.2868,
+        "advantage_pp": -2.37,
+        "strong_over_n": 0,
+        "strong_over_hit_rate": null,
+        "strong_under_n": 241,
+        "strong_under_hit_rate": 0.7054
+      }
+    }
+  },
+  "interpretation": {
+    "coverage_expected": 0.5,
+    "coverage_actual_match": 0.3921,
+    "note": "Si coverage < 0.40: intervalos demasiado estrechos (subconfianza). Si coverage > 0.65: intervalos demasiado anchos (sobreconfianza). Objetivo: 0.40-0.60."
+  }
+}

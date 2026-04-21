@@ -37,14 +37,20 @@ from pathlib import Path
 import pandas as pd
 
 from model.features import (
+    EVENT_FEATURE_SOURCE_COLS,
     FEATURE_SOURCE_COLS,
+    H2H_FEATURE_COLS,
+    REF_FEATURE_COLS,
     TARGET_COL,
     WEATHER_COLS,
     compute_context_features,
     compute_ewma,
+    compute_h2h_features,
     compute_opponent_features,
+    compute_referee_features,
     compute_rolling,
     compute_season_to_date,
+    compute_style_features,
 )
 
 # ─────────────────────────────────────────────────────────────
@@ -69,6 +75,8 @@ CONFIG = {
     "team_stats_glob": "data/whoscored_laliga/**/*_team_stats.parquet",
     "stadiums_path": "data/reference/stadiums.csv",
     "weather_path": "data/reference/weather.parquet",
+    "referee_path": "data/reference/referee_stats.parquet",
+    "event_stats_path": "data/reference/event_stats.parquet",
     "output_path": "data/model/dataset.parquet",
 }
 
@@ -104,6 +112,26 @@ def load_weather() -> pd.DataFrame:
     return w[[c for c in keep if c in w.columns]]
 
 
+def load_event_stats() -> pd.DataFrame:
+    p = CONFIG["event_stats_path"]
+    if not Path(p).exists():
+        raise FileNotFoundError(
+            f"event_stats.parquet no encontrado en {p}. "
+            "Ejecuta: python scripts/event_aggregator.py"
+        )
+    return pd.read_parquet(p)
+
+
+def load_referees() -> pd.DataFrame:
+    p = CONFIG["referee_path"]
+    if not Path(p).exists():
+        raise FileNotFoundError(
+            f"referee_stats.parquet no encontrado en {p}. "
+            "Ejecuta: python scripts/referee_extractor.py"
+        )
+    return pd.read_parquet(p)
+
+
 # ─────────────────────────────────────────────────────────────
 # CONSTRUCCIÓN
 # ─────────────────────────────────────────────────────────────
@@ -112,20 +140,39 @@ def build_dataset() -> pd.DataFrame:
     df = load_team_stats()
     stadiums = load_stadiums()
     weather = load_weather()
+    referees = load_referees()
+    event_stats = load_event_stats()
 
     if df[TARGET_COL].isna().any():
         raise ValueError(f"{TARGET_COL} tiene nulls en team_stats; el scraper debe repoblar")
 
+    # Merge event aggregates antes de rolling para que los nuevos cols entren en rolling/ewma/std
+    log.info("Mergeando event_stats ...")
+    df = df.merge(event_stats, on=["match_id", "team_id"], how="left")
+    for c in EVENT_FEATURE_SOURCE_COLS:
+        nulls = df[c].isna().sum()
+        if nulls:
+            log.warning("event_stats[%s] tiene %d nulls — imputando con mediana", c, nulls)
+            df[c] = df[c].fillna(df[c].median())
+
+    all_source_cols = FEATURE_SOURCE_COLS + EVENT_FEATURE_SOURCE_COLS
+
     log.info("Calculando rolling features ...")
-    df = compute_rolling(df)
+    df = compute_rolling(df, target_cols=all_source_cols)
     log.info("Calculando EWMA features ...")
-    df = compute_ewma(df)
+    df = compute_ewma(df, target_cols=all_source_cols)
     log.info("Calculando season-to-date features ...")
-    df = compute_season_to_date(df)
+    df = compute_season_to_date(df, target_cols=all_source_cols)
+    log.info("Calculando H2H features ...")
+    df = compute_h2h_features(df)
     log.info("Calculando context features ...")
     df = compute_context_features(df)
     log.info("Calculando opponent features ...")
     df = compute_opponent_features(df)
+    log.info("Calculando style features ...")
+    df = compute_style_features(df)
+    log.info("Calculando referee features ...")
+    df = compute_referee_features(df, referees)
 
     # Matchday: del campo `round` del calendario si existe, si no cumcount por season
     df = _add_matchday_number(df)
@@ -176,6 +223,43 @@ def _validate(df: pd.DataFrame) -> None:
         if c in df.columns:
             nulls = df[c].isna().sum()
             assert nulls == 0, f"weather {c} tiene {nulls} nulls"
+
+    # Referee features sin nulls (residual=0 cuando árbitro desconocido)
+    for c in REF_FEATURE_COLS:
+        if c in df.columns:
+            nulls = df[c].isna().sum()
+            assert nulls == 0, f"referee feature {c} tiene {nulls} nulls"
+    if "ref_residual_rolling5" in df.columns:
+        log.info(
+            "Referee residual_rolling5: mean=%.3f std=%.3f min=%.1f max=%.1f",
+            df["ref_residual_rolling5"].mean(), df["ref_residual_rolling5"].std(),
+            df["ref_residual_rolling5"].min(), df["ref_residual_rolling5"].max(),
+        )
+
+    # Style features sin nulls
+    for c in ("rolling5_direct_play", "opp_rolling5_direct_play"):
+        assert c in df.columns, f"style feature {c} ausente del dataset"
+        nulls = df[c].isna().sum()
+        assert nulls == 0, f"style feature {c} tiene {nulls} nulls"
+
+    # Event-based features: verificar que las rolling5 existen
+    # (NaN en primeros partidos de cada equipo es esperado; LightGBM los maneja nativamente)
+    for c in EVENT_FEATURE_SOURCE_COLS:
+        rc = f"rolling5_{c}"
+        assert rc in df.columns, f"event feature {rc} ausente del dataset"
+        nulls = df[rc].isna().sum()
+        if nulls:
+            log.warning("event feature %s tiene %d NaN (primeros partidos — OK)", rc, nulls)
+
+    # H2H features: deben existir; NaN residuales son los primeros enfrentamientos imputados
+    for c in H2H_FEATURE_COLS:
+        assert c in df.columns, f"H2H feature {c} ausente del dataset"
+        nulls = df[c].isna().sum()
+        assert nulls == 0, f"H2H feature {c} tiene {nulls} nulls no imputados"
+    log.info(
+        "H2H: h2h_count mean=%.1f, h2h_avg_throw_ins mean=%.2f",
+        df["h2h_count"].mean(), df["h2h_avg_throw_ins"].mean(),
+    )
 
     log.info("Validación OK.")
 

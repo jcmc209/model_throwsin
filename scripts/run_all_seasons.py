@@ -24,6 +24,8 @@ SEASONS = [
     "2023/2024",
     "2022/2023",
     "2021/2022",
+    "2020/2021",   # nueva
+    "2019/2020",   # nueva
 ]
 
 USE_MONGO   = "--no-mongo"    not in sys.argv
@@ -47,7 +49,7 @@ log.info(f"Temporadas: {', '.join(SEASONS)}")
 log.info(f"MongoDB: {'activado' if USE_MONGO else 'desactivado'}")
 log.info(f"Headless: {HEADLESS}")
 log.info(f"Formato salida: {OUTPUT_FMT}")
-log.info("Estimacion: 5-10 horas (~380 partidos x 4 completas + partidos jugados en 2025/2026)")
+log.info("Estimacion: 8-16 horas (~380 partidos x 6 completas + partidos jugados en 2025/2026)")
 log.info("Puedes cerrar y reanudar: el script continua donde lo dejo")
 log.info("=" * 60)
 
