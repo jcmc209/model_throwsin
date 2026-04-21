@@ -31,6 +31,7 @@ data/model/optuna_study.db
 data/model/predictions/
 data/model/*.bak
 # feature_importance.csv, metrics_*.json, shap_importance.csv y cv_results.* SÍ se suben (livianos)
+data/model/market_eval/
 
 # ── Datos de referencia voluminosos (se regeneran con weather_fetcher.py) ──
 data/reference/weather.parquet
