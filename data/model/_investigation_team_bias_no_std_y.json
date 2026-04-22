@@ -1,0 +1,259 @@
+{
+  "corrections": {
+    "131": {
+      "0": {
+        "n": 14,
+        "raw_bias": -2.7592,
+        "shrunk_bias": -2.0331
+      },
+      "1": {
+        "n": 15,
+        "raw_bias": 0.6952,
+        "shrunk_bias": 0.5214
+      }
+    },
+    "2783": {
+      "0": {
+        "n": 14,
+        "raw_bias": -1.9506,
+        "shrunk_bias": -1.4373
+      },
+      "1": {
+        "n": 15,
+        "raw_bias": -2.0309,
+        "shrunk_bias": -1.5232
+      }
+    },
+    "51": {
+      "0": {
+        "n": 14,
+        "raw_bias": -0.8036,
+        "shrunk_bias": -0.5922
+      },
+      "1": {
+        "n": 16,
+        "raw_bias": -0.4782,
+        "shrunk_bias": -0.3644
+      }
+    },
+    "52": {
+      "0": {
+        "n": 14,
+        "raw_bias": -1.5814,
+        "shrunk_bias": -1.1653
+      },
+      "1": {
+        "n": 15,
+        "raw_bias": -1.1424,
+        "shrunk_bias": -0.8568
+      }
+    },
+    "53": {
+      "0": {
+        "n": 13,
+        "raw_bias": 2.8487,
+        "shrunk_bias": 2.0574
+      },
+      "1": {
+        "n": 15,
+        "raw_bias": 0.3646,
+        "shrunk_bias": 0.2734
+      }
+    },
+    "54": {
+      "0": {
+        "n": 15,
+        "raw_bias": -1.1046,
+        "shrunk_bias": -0.8285
+      },
+      "1": {
+        "n": 14,
+        "raw_bias": -2.4113,
+        "shrunk_bias": -1.7768
+      }
+    },
+    "55": {
+      "0": {
+        "n": 14,
+        "raw_bias": 0.717,
+        "shrunk_bias": 0.5283
+      },
+      "1": {
+        "n": 15,
+        "raw_bias": 0.1873,
+        "shrunk_bias": 0.1405
+      }
+    },
+    "60": {
+      "0": {
+        "n": 16,
+        "raw_bias": -2.3092,
+        "shrunk_bias": -1.7594
+      },
+      "1": {
+        "n": 14,
+        "raw_bias": 0.7535,
+        "shrunk_bias": 0.5552
+      }
+    },
+    "61": {
+      "0": {
+        "n": 15,
+        "raw_bias": 0.1931,
+        "shrunk_bias": 0.1448
+      },
+      "1": {
+        "n": 13,
+        "raw_bias": -0.3673,
+        "shrunk_bias": -0.2653
+      }
+    },
+    "62": {
+      "0": {
+        "n": 14,
+        "raw_bias": -1.6078,
+        "shrunk_bias": -1.1847
+      },
+      "1": {
+        "n": 15,
+        "raw_bias": 0.62,
+        "shrunk_bias": 0.465
+      }
+    },
+    "63": {
+      "0": {
+        "n": 15,
+        "raw_bias": -0.5823,
+        "shrunk_bias": -0.4367
+      },
+      "1": {
+        "n": 14,
+        "raw_bias": 1.4992,
+        "shrunk_bias": 1.1046
+      }
+    },
+    "64": {
+      "0": {
+        "n": 14,
+        "raw_bias": 0.8625,
+        "shrunk_bias": 0.6355
+      },
+      "1": {
+        "n": 15,
+        "raw_bias": 0.5316,
+        "shrunk_bias": 0.3987
+      }
+    },
+    "65": {
+      "0": {
+        "n": 14,
+        "raw_bias": -1.5796,
+        "shrunk_bias": -1.1639
+      },
+      "1": {
+        "n": 15,
+        "raw_bias": 0.1764,
+        "shrunk_bias": 0.1323
+      }
+    },
+    "67": {
+      "0": {
+        "n": 15,
+        "raw_bias": 0.6583,
+        "shrunk_bias": 0.4937
+      },
+      "1": {
+        "n": 16,
+        "raw_bias": -0.0672,
+        "shrunk_bias": -0.0512
+      }
+    },
+    "68": {
+      "0": {
+        "n": 14,
+        "raw_bias": 0.7174,
+        "shrunk_bias": 0.5286
+      },
+      "1": {
+        "n": 15,
+        "raw_bias": -0.9898,
+        "shrunk_bias": -0.7424
+      }
+    },
+    "70": {
+      "0": {
+        "n": 15,
+        "raw_bias": -0.1557,
+        "shrunk_bias": -0.1167
+      },
+      "1": {
+        "n": 15,
+        "raw_bias": 0.8169,
+        "shrunk_bias": 0.6126
+      }
+    },
+    "819": {
+      "0": {
+        "n": 16,
+        "raw_bias": 2.2175,
+        "shrunk_bias": 1.6895
+      },
+      "1": {
+        "n": 13,
+        "raw_bias": 1.9663,
+        "shrunk_bias": 1.4201
+      }
+    },
+    "832": {
+      "0": {
+        "n": 15,
+        "raw_bias": -1.4052,
+        "shrunk_bias": -1.0539
+      },
+      "1": {
+        "n": 14,
+        "raw_bias": -0.7341,
+        "shrunk_bias": -0.5409
+      }
+    },
+    "833": {
+      "0": {
+        "n": 15,
+        "raw_bias": 0.1193,
+        "shrunk_bias": 0.0895
+      },
+      "1": {
+        "n": 15,
+        "raw_bias": -2.0959,
+        "shrunk_bias": -1.5719
+      }
+    },
+    "839": {
+      "0": {
+        "n": 16,
+        "raw_bias": 0.6344,
+        "shrunk_bias": 0.4834
+      },
+      "1": {
+        "n": 13,
+        "raw_bias": 0.0298,
+        "shrunk_bias": 0.0215
+      }
+    }
+  },
+  "description": "INVESTIGACIÓN — biases post-shrinkage sin std_y/opp_std_y (followup/leakage-investigation-std-y). NO ES PRODUCCIÓN.",
+  "features_dropped": [
+    "std_y",
+    "opp_std_y"
+  ],
+  "generated_at": "2026-04-21T23:17:20.007221+00:00",
+  "model_train_seasons": [
+    "2021/2022",
+    "2022/2023",
+    "2023/2024",
+    "2024/2025"
+  ],
+  "model_trained_at": "2026-04-21T23:17:19",
+  "prior_mu": 0.0,
+  "shrinkage_k": 5.0
+}
