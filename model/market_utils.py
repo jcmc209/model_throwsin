@@ -10,12 +10,17 @@ Funciones disponibles:
   devig_proportional(odds_a, odds_b)  → (p_a, p_b)
   devig_shin(odds_a, odds_b)          → (p_a, p_b)
   poisson_over_prob(lam_total, line)  → float
-  build_name_map()                    → dict
+  poisson_under_prob(lam_total, line) → float
+  nbinom_over_prob(mu, line, alpha)   → float | ndarray  (tail con dispersion α)
+  nbinom_under_prob(mu, line, alpha)  → float | ndarray
   normalize_team(name)                → str
   load_team_bias(path)                → dict
   apply_team_bias(lam, team_id, is_home, bias_table)  → ndarray
   shrink_bias(raw_bias, n, k, prior_mu) → float   (Bayesian normal-normal)
   p_home_more(lam_h, lam_w, method)   → (p_home, p_tie, p_away)
+
+Constantes:
+  DEFAULT_NEGBIN_ALPHA — α tuneado offline (grid_mle) sobre val 2025/2026.
 """
 from __future__ import annotations
 
@@ -26,7 +31,7 @@ from pathlib import Path
 from typing import Optional
 
 import numpy as np
-from scipy.stats import poisson, skellam
+from scipy.stats import nbinom, poisson, skellam
 
 log = logging.getLogger("market_utils")
 
@@ -165,6 +170,79 @@ def poisson_over_prob(lam_total: float, line: float) -> float:
 def poisson_under_prob(lam_total: float, line: float) -> float:
     """P(X ≤ line) bajo distribución Poisson. Complementario de over."""
     return 1.0 - poisson_over_prob(lam_total, line)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PROBABILIDADES NEGATIVE BINOMIAL (tail O/U con dispersión tuneable)
+# ─────────────────────────────────────────────────────────────────────────────
+
+# α por defecto — ajustado offline vía
+# `scripts/investigation/tune_alpha_via_cv.py` (method=grid_mle) sobre la val
+# season 2025/2026 el 2026-04-22. Re-tunear cuando el modelo se reentrene
+# (cambia μ ⇒ cambia el α óptimo). Valor en [0.001, 2.0]; si α cae fuera del
+# rango sanity, el tuner escribe `alpha_in_range: false` y NO se promueve.
+DEFAULT_NEGBIN_ALPHA: float = 0.007
+
+
+def _nbinom_params(mu, alpha: float) -> tuple:
+    """(μ, α) → (n, p) scipy. Vectorizado sobre μ.
+
+    Parametrización scipy: X ~ NB(n, p) cuenta nro de fallos antes del n-ésimo éxito.
+        mean = n(1-p)/p       var = n(1-p)/p²
+    Con n = 1/α y p = 1/(1+α·μ):
+        mean = (1/α)·(αμ) = μ                   ✓
+        var  = mean/p = μ·(1+αμ) = μ + α·μ²     ✓
+    """
+    if alpha <= 0:
+        raise ValueError(f"alpha debe ser > 0, recibido {alpha}")
+    mu_arr = np.asarray(mu, dtype=float)
+    if np.any(mu_arr <= 0):
+        raise ValueError("mu debe ser > 0 para NegBin")
+    n = 1.0 / alpha
+    p = 1.0 / (1.0 + alpha * mu_arr)
+    return n, p
+
+
+def nbinom_over_prob(mu, line: float, alpha: float = DEFAULT_NEGBIN_ALPHA):
+    """P(X > line) bajo X ~ NegBin(μ, α). Vectorizado sobre μ.
+
+    Semántica de línea idéntica a `poisson_over_prob`: para líneas .5 (half-ball)
+    `P(over L.5) = P(X ≥ L+1) = 1 - CDF(L, n, p)`. Para líneas enteras (push
+    posible) truncamos al entero inferior, replicando el path Poisson actual —
+    el manejo del push lo resuelve la casa ex-post, no el probability math.
+
+    Args:
+        mu: media predicha por el modelo (scalar o array-like).
+        line: línea del bookmaker (e.g. 44.5).
+        alpha: dispersión NegBin (default: DEFAULT_NEGBIN_ALPHA).
+
+    Returns:
+        P(over) — scalar si `mu` es scalar, ndarray si es array.
+    """
+    mu_arr = np.asarray(mu, dtype=float)
+    scalar_input = mu_arr.ndim == 0
+    mu_flat = np.atleast_1d(mu_arr)
+    # Máscara µ<=0: no apostable, prob=0 (mantener contrato con poisson_over_prob).
+    out = np.zeros(mu_flat.shape, dtype=float)
+    valid = mu_flat > 0
+    if np.any(valid):
+        n, p = _nbinom_params(mu_flat[valid], float(alpha))
+        floor_line = int(line)
+        out[valid] = 1.0 - nbinom.cdf(floor_line, n, p)
+    if scalar_input:
+        return float(out[0])
+    return out
+
+
+def nbinom_under_prob(mu, line: float, alpha: float = DEFAULT_NEGBIN_ALPHA):
+    """P(X ≤ line) bajo X ~ NegBin(μ, α). Complementario exacto de `nbinom_over_prob`.
+
+    En líneas .5 `P(over) + P(under) == 1` exactamente (no hay push). En líneas
+    enteras el floor también implica que `P(over) + P(under) == 1` porque
+    ambos usan `floor(line)` como corte — el push queda enmascarado y lo
+    liquida la casa. Matchea el path Poisson existente.
+    """
+    return 1.0 - nbinom_over_prob(mu, line, alpha)
 
 
 def expected_value(p_model: float, odds: float) -> float:

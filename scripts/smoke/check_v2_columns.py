@@ -2,8 +2,17 @@
 Smoke — columnas v2 en predictions parquet
 ===========================================
 Asserta que el último `predictions_*.parquet` tiene las 3 columnas calibradas
-(`pred_home_v2`, `pred_away_v2`, `pred_total_v2`), son float64, no-null, y
-`pred_total_v2 ≈ pred_home_v2 + pred_away_v2` (tolerancia 1e-6).
+(`pred_home_v2`, `pred_away_v2`, `pred_total_v2`), son float64, no-null.
+
+Nota (change `revert-ensemble-run-mean-matched-test`, 2026-04-22): con el ensemble
+efectivamente deshabilitado (`ENSEMBLE_WEIGHTS={1.0, 0.0, 0.0}` en `predict.py`),
+`pred_total_v2 == pred_total_uniform` y la única divergencia vs `pred_home_v2 +
+pred_away_v2` proviene del bias per-team aplicado SOLO a home/away (no al total).
+Empíricamente ese bias sumado raramente excede ~0.3 throws por partido. Banda
+fijada en ±0.5: fuera de eso → bias explotado, joblib corrupto o regresión.
+
+Si en el futuro se re-activa un ensemble real (weights ≠ {1,0,0}), subir la
+tolerancia acorde (el spread esperado sube a ~5 throws con weights 0.4/0.4/0.2).
 
 Uso:
   python -m scripts.smoke.check_v2_columns
@@ -17,7 +26,7 @@ import numpy as np
 import pandas as pd
 
 REQUIRED = ("pred_home_v2", "pred_away_v2", "pred_total_v2")
-TOL = 1e-6
+ENSEMBLE_TOTAL_TOLERANCE = 0.5  # throws — banda tight con ensemble deshabilitado
 PRED_DIR = Path("data/model/predictions")
 
 
@@ -57,13 +66,15 @@ def main() -> None:
 
     diff = (df["pred_total_v2"] - (df["pred_home_v2"] + df["pred_away_v2"])).abs()
     max_diff = float(diff.max())
-    if max_diff > TOL:
+    if max_diff > ENSEMBLE_TOTAL_TOLERANCE:
         _fail(
-            f"pred_total_v2 != pred_home_v2 + pred_away_v2 (max|diff|={max_diff:.3e} > {TOL}) en {path.name}"
+            f"pred_total_v2 vs (pred_home_v2 + pred_away_v2): max|diff|={max_diff:.3f} > "
+            f"tolerancia ensemble {ENSEMBLE_TOTAL_TOLERANCE} en {path.name} — revisar blend o regresión"
         )
 
     print(
-        f"PASS: {path.name} — {len(df)} filas, v2 columns ok, max|total-home-away|={max_diff:.3e}"
+        f"PASS: {path.name} — {len(df)} filas, v2 columns ok, "
+        f"max|total-home-away|={max_diff:.3f} (tol ±{ENSEMBLE_TOTAL_TOLERANCE})"
     )
     sys.exit(0)
 

@@ -7,7 +7,8 @@ Bucle ligero que:
      (p. ej. con −9h/−3h/−2h/−1h: hasta ~10 h desde ahora).
   3. Por cada partido, comprueba si estamos dentro de una ventana objetivo
      (p. ej. −9h ±5min, −3h ±5min, −2h ±5min, −1h ±5min por defecto).
-  4. Si sí, lanza `codere_scraper.py` (modo fetch) — sin Playwright.
+  4. Si sí, lanza CADA scraper configurado en `CONFIG["scrapers"]` (modo fetch)
+     secuencialmente — actualmente 22bet + Codere (ambos vía API HTTP directa).
   5. Mantiene un `state.json` con qué capturas ya hicimos para no duplicar.
   6. Duerme 5 minutos y repite.
 
@@ -45,10 +46,22 @@ log = logging.getLogger("odds_scheduler")
 CONFIG = {
     "calendar_path": "data/reference/liga_calendar_rows.csv",
     "state_path": "data/reference/odds_scheduler_state.json",
-    "scraper_cmd": [sys.executable, "scripts/odds/codere_scraper.py"],
+    # Lista de scrapers a invocar en cada ventana disparada. Cada entry es la
+    # lista de args (sin el python interpreter — lo anteponemos en runtime).
+    # Un fallo en uno NO bloquea a los demás (ver `_trigger_scraper()`).
+    "scrapers": [
+        ["scripts/odds/22bet_scraper.py"],
+        # Codere: re-habilitado 2026-04-24 (change `automate-codere-discovery`).
+        # Usa API HTTP directa (sin Playwright, sin interacción humana). El
+        # discovery de endpoints es automático con TTL=7d; cache en
+        # `data/reference/codere_endpoints.json`. Ver `followup/restore-codere-scraper`
+        # como referencia histórica.
+        ["scripts/odds/codere_scraper.py"],
+    ],
     "tz_local": "Europe/Madrid",  # kick-offs en hora peninsular
     "sleep_seconds": 300,         # 5 min
     "window_tolerance_min": 5,    # ±5 min sobre la hora objetivo
+    "scraper_timeout_s": 300,     # timeout por scraper (cada uno, no global)
 }
 
 
@@ -150,19 +163,46 @@ def run_iteration(windows: list[int]) -> None:
 
 
 def _trigger_scraper() -> None:
-    """Lanza scraper en modo fetch (sin Playwright, usa endpoints guardados)."""
-    try:
-        result = subprocess.run(
-            CONFIG["scraper_cmd"],
-            capture_output=True, text=True, timeout=300,
+    """Lanza TODOS los scrapers configurados en `CONFIG["scrapers"]` secuencialmente.
+
+    Cada uno corre en modo fetch (sin Playwright, usa endpoints guardados o API
+    pública según el scraper). Un fallo (exit != 0, excepción, timeout) en uno
+    NO aborta los demás — logueamos WARN y seguimos. Esto garantiza que si Codere
+    vuelve a fallar, 22bet igual captura, y viceversa.
+    """
+    scrapers = CONFIG.get("scrapers", [])
+    if not scrapers:
+        log.warning("CONFIG['scrapers'] vacío — nada que ejecutar.")
+        return
+
+    timeout = CONFIG.get("scraper_timeout_s", 300)
+    for cmd_args in scrapers:
+        # Nombre amigable del scraper = basename del script (último arg que termina en .py).
+        script_name = next(
+            (Path(a).name for a in cmd_args if str(a).endswith(".py")),
+            " ".join(cmd_args),
         )
-        if result.returncode != 0:
-            log.warning("Scraper devolvió código %d\nSTDOUT: %s\nSTDERR: %s",
-                        result.returncode, result.stdout[-500:], result.stderr[-500:])
-        else:
-            log.info("Scraper OK (%d bytes stdout)", len(result.stdout))
-    except Exception as exc:
-        log.error("Error ejecutando scraper: %s", exc)
+        full_cmd = [sys.executable, *cmd_args]
+        log.info("Lanzando scraper: %s", script_name)
+        try:
+            result = subprocess.run(
+                full_cmd,
+                capture_output=True, text=True, timeout=timeout,
+            )
+            if result.returncode != 0:
+                log.warning(
+                    "Scraper %s devolvió código %d\nSTDOUT: %s\nSTDERR: %s",
+                    script_name, result.returncode,
+                    result.stdout[-500:], result.stderr[-500:],
+                )
+            else:
+                log.info("Scraper %s OK (%d bytes stdout)",
+                         script_name, len(result.stdout))
+        except subprocess.TimeoutExpired:
+            log.warning("Scraper %s timeout (>%ds) — continúo con el resto.",
+                        script_name, timeout)
+        except Exception as exc:
+            log.error("Error ejecutando scraper %s: %s", script_name, exc)
 
 
 # ─────────────────────────────────────────────────────────────

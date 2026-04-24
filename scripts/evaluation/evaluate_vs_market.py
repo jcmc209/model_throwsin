@@ -14,11 +14,23 @@ Uso:
   python scripts/evaluation/evaluate_vs_market.py --market all
   python scripts/evaluation/evaluate_vs_market.py --devig shin
   python scripts/evaluation/evaluate_vs_market.py --pred-col pred_total_v2
+  python scripts/evaluation/evaluate_vs_market.py --variance-model negbin   # default
+  python scripts/evaluation/evaluate_vs_market.py --variance-model poisson  # legacy
+
+Modelo de varianza (O/U):
+  `--variance-model=negbin` (default) usa X ~ NegBin(μ, α) con
+  α = DEFAULT_NEGBIN_ALPHA (tuneado offline, ver `scripts/investigation/
+  tune_alpha_via_cv.py`). Alinea con el default de `value_bets.py`.
+  `--variance-model=poisson` mantiene el path legacy para diff/comparación.
+  NOTA: `team_with_more` pricea con Skellam (3-way) — no toca este flag.
 
 Outputs (bajo data/model/market_eval/):
   eval_total_over_under_YYYYMMDD.{parquet,csv}
   eval_team_with_more_YYYYMMDD.{parquet,csv}
   eval_summary_YYYYMMDD.json         — métricas agregadas por mercado
+  (Si se pasa --suffix <tag>, los artefactos quedan como
+   eval_<market>_YYYYMMDD_<tag>.{...} y eval_summary_YYYYMMDD_<tag>.json
+   para permitir correr Poisson y NegBin sin pisar archivos.)
 """
 from __future__ import annotations
 
@@ -40,10 +52,13 @@ if str(_root) not in sys.path:
     sys.path.insert(0, str(_root))
 
 from model.market_utils import (
+    DEFAULT_NEGBIN_ALPHA,
     TEAM_NAME_MAP,
     devig_proportional,
     devig_shin,
     expected_value,
+    nbinom_over_prob,
+    nbinom_under_prob,
     normalize_team,
     p_home_more,
     poisson_over_prob,
@@ -504,17 +519,51 @@ def attach_predictions_team_with_more(df: pd.DataFrame) -> pd.DataFrame:
 # MÉTRICAS POR FILA
 # ─────────────────────────────────────────────────────────────────────────────
 
-def compute_rows_ou(df: pd.DataFrame) -> pd.DataFrame:
-    """Métricas por partido para total_over_under."""
+def compute_rows_ou(
+    df: pd.DataFrame,
+    variance_model: str = "negbin",
+    alpha: float | None = None,
+) -> pd.DataFrame:
+    """
+    Métricas por partido para total_over_under.
+
+    Args:
+        df: filas cruzadas con columnas `pred_total`, `line`, `real_total`.
+        variance_model: "negbin" (default, alinea con value_bets) | "poisson".
+            NegBin usa α = `alpha` o `DEFAULT_NEGBIN_ALPHA` de market_utils.
+            Invariante single-source: toda la matemática de NegBin vive en
+            `model.market_utils.nbinom_{over,under}_prob` — no duplicar acá.
+        alpha: override opcional para α NegBin. Ignorado si poisson.
+
+    Returns:
+        df con p_model_over/under/edge/ev + columnas de auditabilidad
+        (`variance_model`, `alpha`).
+    """
+    if variance_model not in ("poisson", "negbin"):
+        raise ValueError(
+            f"variance_model debe ser 'poisson' o 'negbin', recibí {variance_model!r}"
+        )
+    alpha_eff = float(alpha) if alpha is not None else DEFAULT_NEGBIN_ALPHA
+
     df = df.copy()
     df["realized_over"] = (df["real_total"] > df["line"]).astype(int)
 
     has_pred = df["pred_total"].notna()
     df["p_model_over"] = np.nan
-    df.loc[has_pred, "p_model_over"] = df.loc[has_pred].apply(
-        lambda r: poisson_over_prob(r["pred_total"], r["line"]), axis=1
-    )
+    if variance_model == "negbin":
+        df.loc[has_pred, "p_model_over"] = df.loc[has_pred].apply(
+            lambda r: float(nbinom_over_prob(r["pred_total"], r["line"], alpha_eff)),
+            axis=1,
+        )
+    else:  # poisson
+        df.loc[has_pred, "p_model_over"] = df.loc[has_pred].apply(
+            lambda r: poisson_over_prob(r["pred_total"], r["line"]), axis=1
+        )
     df["p_model_under"] = 1.0 - df["p_model_over"]
+
+    # Auditabilidad: estampamos la configuración en cada fila
+    df["variance_model"] = variance_model
+    df["alpha"] = alpha_eff if variance_model == "negbin" else np.nan
 
     df["edge_over"]  = df["p_model_over"]  - df["p_mkt_over"]
     df["edge_under"] = df["p_model_under"] - df["p_mkt_under"]
@@ -822,7 +871,12 @@ def print_summary(metrics: dict) -> None:
 # PIPELINE POR MERCADO
 # ─────────────────────────────────────────────────────────────────────────────
 
-def run_ou(devig_fn, pred_col: str) -> tuple[pd.DataFrame, dict]:
+def run_ou(
+    devig_fn,
+    pred_col: str,
+    variance_model: str = "negbin",
+    alpha: float | None = None,
+) -> tuple[pd.DataFrame, dict]:
     odds = load_odds_ou(devig_fn)
     results = load_results_ou()
     log.info("O/U Codere: %d pares partido×línea", len(odds))
@@ -834,13 +888,17 @@ def run_ou(devig_fn, pred_col: str) -> tuple[pd.DataFrame, dict]:
     log.info("O/U partidos cruzados: %d", len(df))
 
     df = attach_predictions_ou(df, pred_col)
-    df = compute_rows_ou(df)
+    df = compute_rows_ou(df, variance_model=variance_model, alpha=alpha)
 
     # Determinismo: ordenar por claves estables
     sort_cols = [c for c in ["match_date", "match_id", "home_ds", "away_ds", "line"] if c in df.columns]
     df = df.sort_values(sort_cols, kind="stable").reset_index(drop=True)
 
     metrics = aggregate_ou(df)
+    metrics["variance_model"] = variance_model
+    metrics["alpha"] = float(alpha) if alpha is not None else (
+        DEFAULT_NEGBIN_ALPHA if variance_model == "negbin" else None
+    )
     return df, metrics
 
 
@@ -882,11 +940,11 @@ def _clean_for_parquet(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
-def save_market(df: pd.DataFrame, market: str, today_str: str) -> dict:
+def save_market(df: pd.DataFrame, market: str, today_str: str, suffix: str = "") -> dict:
     if df.empty:
         return {}
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-    base = OUTPUT_DIR / f"eval_{market}_{today_str}"
+    base = OUTPUT_DIR / f"eval_{market}_{today_str}{suffix}"
     parquet_path = base.with_suffix(".parquet")
     csv_path = base.with_suffix(".csv")
 
@@ -917,6 +975,17 @@ def main() -> None:
                         help="Mercado a evaluar (default: all)")
     parser.add_argument("--output-dir", default=None,
                         help="Override del directorio de output")
+    parser.add_argument("--variance-model", choices=["poisson", "negbin"],
+                        default="negbin",
+                        help="Modelo de varianza para O/U: 'negbin' (default, alinea con "
+                             "value_bets, α = DEFAULT_NEGBIN_ALPHA de market_utils) o "
+                             "'poisson' (legacy). team_with_more usa Skellam siempre.")
+    parser.add_argument("--alpha", type=float, default=None,
+                        help="Override de α NegBin. Default: DEFAULT_NEGBIN_ALPHA de "
+                             "model/market_utils.py. Sólo aplica a O/U si --variance-model=negbin.")
+    parser.add_argument("--suffix", default=None,
+                        help="Sufijo opcional para los archivos de output (ej. 'poisson' o "
+                             "'negbin') — permite correr ambos modelos sin pisar artefactos.")
     args = parser.parse_args()
 
     global OUTPUT_DIR
@@ -924,13 +993,22 @@ def main() -> None:
         OUTPUT_DIR = Path(args.output_dir)
 
     devig_fn = DEVIG_METHODS[args.devig]
-    log.info("Devig=%s | pred_col=%s | market=%s", args.devig, args.pred_col, args.market)
+    alpha_effective = args.alpha if args.alpha is not None else DEFAULT_NEGBIN_ALPHA
+    log.info(
+        "Devig=%s | pred_col=%s | market=%s | variance_model=%s%s%s",
+        args.devig, args.pred_col, args.market, args.variance_model,
+        f" alpha={alpha_effective:.4f}" if args.variance_model == "negbin" else "",
+        f" suffix={args.suffix}" if args.suffix else "",
+    )
 
     today_str = date.today().strftime("%Y%m%d")
+    suffix_tag = f"_{args.suffix}" if args.suffix else ""
     summary: dict = {
         "run_date": today_str,
         "devig": args.devig,
         "pred_col": args.pred_col,
+        "variance_model": args.variance_model,
+        "alpha": float(alpha_effective) if args.variance_model == "negbin" else None,
         "markets": {},
         "artifacts": {},
     }
@@ -939,21 +1017,27 @@ def main() -> None:
 
     for market in markets_to_run:
         if market == "total_over_under":
-            df, metrics = run_ou(devig_fn, args.pred_col)
+            df, metrics = run_ou(
+                devig_fn, args.pred_col,
+                variance_model=args.variance_model,
+                alpha=args.alpha,
+            )
         elif market == "team_with_more":
+            # team_with_more usa Skellam/MC (3-way) — fuera de scope de --variance-model.
+            # Followup: extender al 3-way con una distribución bivariada dispersa.
             df, metrics = run_team_with_more()
         else:
             continue
 
         print_summary(metrics)
         summary["markets"][market] = metrics
-        paths = save_market(df, market, today_str)
+        paths = save_market(df, market, today_str, suffix=suffix_tag)
         if paths:
             summary["artifacts"][market] = paths
 
     # Summary JSON
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-    summary_path = OUTPUT_DIR / f"eval_summary_{today_str}.json"
+    summary_path = OUTPUT_DIR / f"eval_summary_{today_str}{suffix_tag}.json"
     with open(summary_path, "w", encoding="utf-8") as f:
         json.dump(summary, f, indent=2, default=str, sort_keys=True)
     log.info("Summary JSON: %s", summary_path)

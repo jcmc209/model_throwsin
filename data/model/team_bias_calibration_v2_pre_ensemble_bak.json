@@ -242,14 +242,14 @@
     }
   },
   "description": "Sesgo post-hoc por (team_id, is_home) con shrinkage bayesiano — regenerado desde model/train.py (prior normal-normal, k=5.00, mu=0.00)",
-  "generated_at": "2026-04-22T11:55:31.982698+00:00",
+  "generated_at": "2026-04-22T08:27:20.795946+00:00",
   "model_train_seasons": [
     "2021/2022",
     "2022/2023",
     "2023/2024",
     "2024/2025"
   ],
-  "model_trained_at": "2026-04-22T11:55:31",
+  "model_trained_at": "2026-04-22T08:27:20",
   "prior_mu": 0.0,
   "shrinkage_k": 5.0
 }

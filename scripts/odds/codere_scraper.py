@@ -1,34 +1,73 @@
 """
-Codere Scraper — Throw-ins odds
-================================
-Scraper completamente autónomo de las cuotas de saques de banda (over/under) de
-Codere para los partidos de LaLiga. Dos modos:
+Codere - Scraper de Saques de Banda - La Liga España
+=====================================================
+API pública: `https://m.apuestas.codere.es/NavigationService/*`
 
-1. DISCOVERY (--discover): abre Playwright, navega a la página de fútbol de
-   Codere, intercepta todas las llamadas XHR/Fetch, identifica los endpoints
-   que devuelven (a) listado de eventos de LaLiga y (b) mercados por evento.
-   Guarda los patrones en `data/reference/codere_endpoints.json`.
+Endpoints descubiertos (Apr 2026, change `automate-codere-discovery`):
 
-2. FETCH (default): usa los endpoints descubiertos para scrapear cuotas vía
-   `requests` directamente, sin navegador. Mucho más rápido y estable.
-   Itera todos los partidos activos de LaLiga, busca el mercado
-   "saques de banda" (over/under) y lo guarda en
-   `data/reference/odds_history.parquet` con una fila por (match, timestamp, line).
+  1. `Event/GetEvents?parentId={league_node_id}`
+       -> lista de partidos próximos de una competición.
+       Para LaLiga (`Primera División`) `parentId = 2903511051`.
+       Devuelve dicts con `NodeId`, `ParticipantHome`, `ParticipantAway`,
+       `StartDate` (formato `/Date(millis)/`), etc.
+
+  2. `Category/GetCategoryNoLiveInfos?parentid={event_node_id}`
+       -> lista de categorías de mercados para un evento
+       (`PRINCIPALES`, `ESTADÍSTICAS`, `TIROS`, ...).
+
+  3. `Game/GetGamesNoLiveByCategoryInfo?parentid={event_node_id}&categoryInfoId={cat_id}`
+       -> lista de mercados (`Games`) con sus `Results` (selecciones + cuotas).
+
+En `Results`:
+  - `Odd`           -> cuota decimal (e.g. 1.95)
+  - `Name`          -> label selección ("Más de 41.5", "Menos de 41.5",
+                       "Real Betis", "Empate", etc.)
+  - `GameSpecialOddsValue` en el padre (`Spov`) -> línea cuando el mercado es
+                       O/U ("`<Spov>41.5`"), vacío en mercados 3-way.
+
+Mercados objetivo (nombres exactos usados en el histórico
+`data/reference/odds_codere.parquet`):
+  - "Total de Saques de Banda Más/Menos"          -> `total_over_under`
+  - "Equipo con Más Saques de Banda"              -> `team_with_more`
+
+Nota importante — VENTANA DE DISPONIBILIDAD:
+  Codere suele abrir el mercado de saques de banda SÓLO en las horas previas
+  al kick-off (no es pre-match permanente). Si la API no devuelve mercados de
+  saques ahora mismo, el scraper sale con 0 filas y exit 0 (success) — el
+  scheduler lo volverá a llamar en la siguiente ventana T-3h/-2h/-1h.
+
+Esquema del parquet resultante (alineado con `odds_codere.parquet` legacy
+y con `odds_22bet.parquet`):
+  home_team, away_team, scraped_at,
+  bookmaker='codere', market_type ('total_over_under'|'team_with_more'),
+  line (float|NaN), side ('over'|'under'|'home'|'away'|'draw'),
+  odds, raw_market_name, raw_selection
 
 Uso:
-  python scripts/odds/codere_scraper.py --discover             # 1 vez, cuando el mercado esté abierto
-  python scripts/odds/codere_scraper.py                        # fetch, puede lanzarse cada N min
-  python scripts/odds/codere_scraper.py --dry-run              # fetch sin guardar (debug)
+  python scripts/odds/codere_scraper.py                         # fetch y guarda
+  python scripts/odds/codere_scraper.py --dry-run               # fetch sin guardar
+  python scripts/odds/codere_scraper.py --list-games            # lista partidos
+  python scripts/odds/codere_scraper.py --max-matches 3         # sólo N partidos (smoke)
+  python scripts/odds/codere_scraper.py --markets total_over_under  # un mercado
+  python scripts/odds/codere_scraper.py --markets all           # ambos (default)
+  python scripts/odds/codere_scraper.py --force-rediscover      # refresca endpoints cache
+
+Discovery automático:
+  El scraper usa rutas API fijas. La primera corrida (o cuando la cache expira
+  a los 7 días) ping-ea cada endpoint para verificar que sigue respondiendo
+  200 y persiste `data/reference/codere_endpoints.json` como cache/traza para
+  auditoría externa. NO requiere Playwright ni interacción humana.
 """
 from __future__ import annotations
 
 import argparse
 import json
 import logging
+import random
 import re
 import sys
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pandas as pd
@@ -45,333 +84,586 @@ logging.basicConfig(
 log = logging.getLogger("codere_scraper")
 
 CONFIG = {
-    "codere_laliga_url": "https://www.codere.es/deportes/#/HorseLandingPage/Fútbol/España/LaLiga",
+    "base_url": "https://m.apuestas.codere.es/NavigationService",
+    "laliga_node_id": 2903511051,  # Primera División
+
+    # Paths descubiertos (ver docstring).
+    "events_path": "Event/GetEvents",
+    "categories_path": "Category/GetCategoryNoLiveInfos",
+    "games_path": "Game/GetGamesNoLiveByCategoryInfo",
+
+    # Cache de endpoints — refresca cada N días para detectar si algún path
+    # devuelve 404 (ruptura de API) sin rehacer todo el scrape. No contiene
+    # secretos ni cookies: es sólo traza.
     "endpoints_path": "data/reference/codere_endpoints.json",
-    "odds_history_path": "data/reference/odds_history.parquet",
-    "user_agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-        "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-    ),
-    # Patrones de detección de mercado "saques de banda".
-    # En DISCOVERY imprimimos todo y ajustamos si es necesario.
-    "throw_in_keywords": [
-        "saque", "saques de banda", "throw-in", "throw in", "throwin",
-    ],
+    "endpoints_ttl_days": 7,
+
+    # Output
+    "odds_history_path": "data/reference/odds_codere.parquet",
+
+    # Rate limiting + retries
+    "request_delay": 1.5,    # base
+    "request_jitter": 0.5,   # ±jitter
+    "timeout": 20,
+    "max_retries": 3,
+    "retry_backoff": 2.0,    # factor exponencial
+
+    # Keywords de matching de mercado (lowercase, case-insensitive). Cubre
+    # tanto "saques de banda" como variantes de otros idiomas defensivo.
+    "throw_in_keywords": ["saque", "banda", "throw-in", "throw in"],
+
+    # Categorías prioritarias donde Codere listó históricamente 'Saques de
+    # Banda' (ESTADÍSTICAS=78, ESPECIALES=60, PRINCIPALES=99, EQUIPOS=40).
+    # Mantenemos este subset para evitar pedir las 19 categorías × N partidos
+    # en cada fetch — reduce tiempo de scrape de ~5min a ~1min. Si el mercado
+    # se ofrece en una categoría no listada, el scrape no la verá, pero ese
+    # set cubre el 100% del histórico observado.
+    "priority_category_ids": [78, 60, 99, 40],
 }
 
+
+HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/124.0.0.0 Safari/537.36"
+    ),
+    "Accept": "application/json, text/plain, */*",
+    "Accept-Language": "es-ES,es;q=0.9",
+    "Referer": "https://m.apuestas.codere.es/deportes/",
+    "Origin": "https://m.apuestas.codere.es",
+}
+
+
+def _polite_sleep() -> None:
+    """Duerme request_delay ± jitter aleatorio para evitar patrón de bot."""
+    base = CONFIG["request_delay"]
+    jit = CONFIG["request_jitter"]
+    time.sleep(max(0.0, base + random.uniform(-jit, jit)))
+
+
 # ─────────────────────────────────────────────────────────────
-# DISCOVERY (Playwright)
+# HTTP layer (mirror del patrón 22bet)
 # ─────────────────────────────────────────────────────────────
 
-def discover() -> None:
-    """Abre Codere con Playwright, navega a LaLiga, intercepta XHR/Fetch y
-    guarda los endpoints que devuelven JSON con partidos/mercados.
+def _get(path: str, params: dict | None = None) -> list | dict | None:
+    """GET al endpoint de Codere con retries + backoff exponencial.
 
-    Requiere:
-      pip install playwright && playwright install chromium
+    `path` es relativo a `CONFIG["base_url"]`. Parámetros via querystring.
+    Devuelve el JSON parseado, o None si todos los reintentos fallan.
     """
-    try:
-        from playwright.sync_api import sync_playwright
-    except ImportError:
-        log.error("Playwright no instalado. Ejecuta: pip install playwright && playwright install chromium")
-        sys.exit(2)
-
-    captured: list[dict] = []
-
-    log.info("Iniciando discovery de Codere LaLiga ...")
-    with sync_playwright() as p:
-        browser = p.chromium.launch(headless=False)  # visible para depurar
-        context = browser.new_context(user_agent=CONFIG["user_agent"])
-        page = context.new_page()
-
-        def on_response(response):
-            try:
-                url = response.url
-                content_type = response.headers.get("content-type", "")
-                if "json" not in content_type.lower():
-                    return
-                # Filtrar solo llamadas de la API (no estáticos)
-                if not any(k in url.lower() for k in ("codere", "api", "sports", "event", "market", "fixture")):
-                    return
-                body_text = ""
-                try:
-                    body_text = response.text()[:2000]
-                except Exception:
-                    return
-                captured.append({
-                    "url": url,
-                    "status": response.status,
-                    "method": response.request.method,
-                    "content_type": content_type,
-                    "body_preview": body_text,
-                })
-            except Exception as exc:
-                log.debug("on_response error: %s", exc)
-
-        page.on("response", on_response)
-
-        log.info("Navegando a %s ...", CONFIG["codere_laliga_url"])
+    url = f"{CONFIG['base_url']}/{path}"
+    last_exc: Exception | None = None
+    for attempt in range(CONFIG["max_retries"]):
         try:
-            page.goto(CONFIG["codere_laliga_url"], wait_until="domcontentloaded", timeout=60_000)
-        except Exception as exc:
-            log.warning("Timeout inicial (%s). Continuando con lo capturado hasta ahora.", exc)
-
-        log.info("Esperando 25s para que la SPA cargue y dispare XHRs ...")
-        page.wait_for_timeout(25_000)
-
-        log.info("Para capturar mercado de saques, abre MANUALMENTE un partido en la ventana y su mercado de saques de banda.")
-        log.info("Tienes 60 segundos, pulsa Ctrl+C en consola para salir antes si ya ves las llamadas.")
-        try:
-            page.wait_for_timeout(60_000)
-        except KeyboardInterrupt:
-            pass
-
-        browser.close()
-
-    out_path = Path(CONFIG["endpoints_path"])
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(out_path, "w", encoding="utf-8") as f:
-        json.dump({"captured_at": datetime.now(timezone.utc).isoformat(),
-                   "requests": captured}, f, indent=2, ensure_ascii=False)
-    log.info("Guardadas %d llamadas JSON en %s", len(captured), out_path)
-
-    # Imprimir resumen para que el usuario identifique los endpoints
-    print()
-    print("=" * 80)
-    print("RESUMEN DE ENDPOINTS CAPTURADOS (para identificar LaLiga y saques de banda)")
-    print("=" * 80)
-    unique_urls = {}
-    for c in captured:
-        # normalizar URL para agrupar (quitar parámetros numéricos)
-        norm = re.sub(r"/\d+", "/{id}", c["url"].split("?")[0])
-        unique_urls.setdefault(norm, []).append(c["url"])
-    for norm, urls in sorted(unique_urls.items()):
-        sample = urls[0]
-        preview = next((c["body_preview"][:150] for c in captured if c["url"] == sample), "")
-        print(f"\n[{len(urls):3d}x] {norm}")
-        print(f"      ejemplo: {sample}")
-        print(f"      body:    {preview}...")
-
-    print()
-    print("SIGUIENTE PASO:")
-    print("  1. Identifica en la lista cuál es el endpoint que devuelve partidos de LaLiga")
-    print("  2. Identifica cuál devuelve mercados con 'saques de banda'")
-    print(f"  3. Edita manualmente {out_path} añadiendo campos:")
-    print('       "events_endpoint": "URL o patrón con {liga_id}",')
-    print('       "markets_endpoint": "URL o patrón con {event_id}"')
-    print(f"  4. Ejecuta: python scripts/odds/codere_scraper.py (modo fetch)")
+            r = requests.get(url, params=params or {}, headers=HEADERS,
+                             timeout=CONFIG["timeout"])
+            r.raise_for_status()
+            # Codere API responde 200 con cuerpo vacío si no hay data; cubrir.
+            if not r.content:
+                return None
+            return r.json()
+        except requests.HTTPError as e:
+            status = e.response.status_code if e.response is not None else "?"
+            if (e.response is not None and 400 <= e.response.status_code < 500
+                    and e.response.status_code != 429):
+                log.warning("HTTP %s en %s (no se reintenta)", status, url)
+                return None
+            last_exc = e
+            log.info("HTTP %s en %s (intento %d/%d)", status, url,
+                     attempt + 1, CONFIG["max_retries"])
+        except Exception as e:
+            last_exc = e
+            log.info("Error en %s: %s (intento %d/%d)", url, e,
+                     attempt + 1, CONFIG["max_retries"])
+        if attempt < CONFIG["max_retries"] - 1:
+            time.sleep(CONFIG["retry_backoff"] ** attempt)
+    log.warning("Falló %s tras %d intentos: %s", url, CONFIG["max_retries"], last_exc)
+    return None
 
 
 # ─────────────────────────────────────────────────────────────
-# FETCH (requests, usa endpoints descubiertos)
+# Endpoints cache (auto-discovery)
 # ─────────────────────────────────────────────────────────────
 
-def _load_endpoints() -> dict:
+def _endpoints_cache_fresh() -> bool:
+    """True si el JSON de cache existe, tiene las claves requeridas y no ha
+    expirado. Si no, hace falta regenerarlo."""
     p = Path(CONFIG["endpoints_path"])
     if not p.exists():
-        log.error("No hay endpoints guardados en %s — ejecuta primero con --discover.", p)
-        sys.exit(2)
-    with open(p, "r", encoding="utf-8") as f:
-        data = json.load(f)
-    if "events_endpoint" not in data or "markets_endpoint" not in data:
-        log.error(
-            "El fichero %s no tiene 'events_endpoint' y 'markets_endpoint'. "
-            "Edítalo manualmente tras el discovery.", p,
-        )
-        sys.exit(2)
-    return data
+        return False
+    try:
+        data = json.loads(p.read_text(encoding="utf-8"))
+    except Exception:
+        return False
+    required = {"events_endpoint", "markets_endpoint", "discovered_at"}
+    if not required.issubset(data):
+        return False
+    try:
+        ts = datetime.fromisoformat(data["discovered_at"].replace("Z", "+00:00"))
+    except Exception:
+        return False
+    age_days = (datetime.now(timezone.utc) - ts).total_seconds() / 86400.0
+    return age_days <= CONFIG["endpoints_ttl_days"]
 
 
-def _match_throw_in_market(market_name: str) -> bool:
-    name_lower = (market_name or "").lower()
-    return any(k in name_lower for k in CONFIG["throw_in_keywords"])
+def _discover_endpoints(force: bool = False) -> dict:
+    """Verifica las 3 rutas API contra un partido real de LaLiga y persiste
+    `codere_endpoints.json` con `events_endpoint` + `markets_endpoint` +
+    `discovered_at` (+ sample_response_shapes).
 
-
-def fetch_odds(dry_run: bool = False) -> pd.DataFrame:
-    endpoints = _load_endpoints()
-    sess = requests.Session()
-    sess.headers.update({"User-Agent": CONFIG["user_agent"]})
-
-    log.info("Descargando listado de eventos de LaLiga ...")
-    events_url = endpoints["events_endpoint"]
-    r = sess.get(events_url, timeout=30)
-    r.raise_for_status()
-    events_json = r.json()
-
-    # Extracción del listado de eventos. Como no conocemos el schema exacto hasta
-    # el discovery, lo hacemos genérico: buscamos listas con objetos que tengan
-    # campos tipo "id", "name", "startDate" / "date" / "event_id".
-    events = _extract_events(events_json)
-    log.info("Eventos de LaLiga encontrados: %d", len(events))
-    if not events:
-        log.warning("No se extrajeron eventos — revisa _extract_events() y el schema devuelto.")
-        return pd.DataFrame()
-
-    rows = []
-    now = datetime.now(timezone.utc)
-    for ev in events:
-        event_id = ev.get("id") or ev.get("event_id")
-        if not event_id:
-            continue
-        markets_url = endpoints["markets_endpoint"].format(event_id=event_id)
-        try:
-            r = sess.get(markets_url, timeout=30)
-            r.raise_for_status()
-            markets_json = r.json()
-        except Exception as exc:
-            log.warning("Evento %s (%s vs %s): %s", event_id, ev.get("home"), ev.get("away"), exc)
-            continue
-
-        markets = _extract_markets(markets_json)
-        for mkt in markets:
-            if not _match_throw_in_market(mkt.get("name", "")):
-                continue
-            for sel in mkt.get("selections", []):
-                line = sel.get("line")
-                side = sel.get("side")    # "over" | "under"
-                price = sel.get("price")
-                if line is None or side is None or price is None:
-                    continue
-                rows.append({
-                    "match_id": int(event_id) if str(event_id).isdigit() else str(event_id),
-                    "home_team": ev.get("home"),
-                    "away_team": ev.get("away"),
-                    "match_date": ev.get("start"),
-                    "scraped_at": now,
-                    "hours_before": _hours_before(now, ev.get("start")),
-                    "market_name": mkt.get("name"),
-                    "line": float(line),
-                    "side": side,
-                    "odds": float(price),
-                    "bookmaker": "codere",
-                })
-        time.sleep(0.2)  # rate limiting suave
-
-    df = pd.DataFrame(rows)
-    log.info("Cuotas extraídas: %d filas para %d partidos", len(df), df["match_id"].nunique() if len(df) else 0)
-
-    if dry_run:
-        print(df.head(30).to_string(index=False))
-        return df
-
-    if len(df):
-        _append_to_history(df)
-    return df
-
-
-def _extract_events(events_json) -> list[dict]:
-    """Normaliza el JSON de eventos a lista de dicts con campos id, home, away, start.
-
-    Placeholder flexible — ajustar según schema real tras discovery.
+    100% headless, 100% automático — sin Playwright. La función pinguea cada
+    endpoint; si uno devuelve 404 o no está bien formado, retorna un dict
+    `{"ok": False, "error": "..."}` y NO escribe el archivo.
     """
-    events = []
-    # Búsqueda genérica de listas de eventos
-    candidates = []
-    if isinstance(events_json, list):
-        candidates = events_json
-    elif isinstance(events_json, dict):
-        # busca cualquier clave que contenga "event" o "fixture" o "match"
-        for k, v in events_json.items():
-            if isinstance(v, list) and len(v) and isinstance(v[0], dict):
-                if any(kw in k.lower() for kw in ("event", "fixture", "match", "item")):
-                    candidates = v
-                    break
-        if not candidates:
-            # fallback: la primera lista de dicts del JSON
-            for v in events_json.values():
-                if isinstance(v, list) and len(v) and isinstance(v[0], dict):
-                    candidates = v
-                    break
+    if not force and _endpoints_cache_fresh():
+        p = Path(CONFIG["endpoints_path"])
+        return json.loads(p.read_text(encoding="utf-8"))
 
-    for c in candidates:
-        # Normalización flexible de campos
-        ev_id = c.get("id") or c.get("eventId") or c.get("event_id")
-        home = c.get("home") or c.get("homeTeam") or c.get("home_team") or c.get("participant1")
-        away = c.get("away") or c.get("awayTeam") or c.get("away_team") or c.get("participant2")
-        start = c.get("startDate") or c.get("startTime") or c.get("start") or c.get("date")
-        if isinstance(home, dict):
-            home = home.get("name")
-        if isinstance(away, dict):
-            away = away.get("name")
-        if ev_id and home and away:
-            events.append({"id": ev_id, "home": home, "away": away, "start": start})
-    return events
+    log.info("Verificando endpoints Codere (discovery automático)...")
+    league = CONFIG["laliga_node_id"]
 
+    events = _get(CONFIG["events_path"], {"parentId": league, "gameTypes": ""})
+    if not isinstance(events, list) or not events:
+        return {"ok": False,
+                "error": "events endpoint no devolvió lista de partidos"}
 
-def _extract_markets(markets_json) -> list[dict]:
-    """Normaliza el JSON de mercados a lista [{name, selections: [{line, side, price}]}].
-    Placeholder flexible.
-    """
-    markets_raw = []
-    if isinstance(markets_json, list):
-        markets_raw = markets_json
-    elif isinstance(markets_json, dict):
-        for k, v in markets_json.items():
-            if isinstance(v, list) and len(v) and isinstance(v[0], dict):
-                if "market" in k.lower() or "bet" in k.lower():
-                    markets_raw = v
-                    break
-        if not markets_raw:
-            for v in markets_json.values():
-                if isinstance(v, list) and len(v) and isinstance(v[0], dict):
-                    markets_raw = v
-                    break
+    sample_event = events[0]
+    eid = sample_event.get("NodeId")
+    if not eid:
+        return {"ok": False, "error": "event sin NodeId"}
 
-    out = []
-    for m in markets_raw:
-        name = m.get("name") or m.get("marketName") or m.get("title") or ""
-        sels_raw = m.get("selections") or m.get("outcomes") or m.get("runners") or []
-        sels = []
-        for s in sels_raw:
-            line = s.get("line") or s.get("handicap") or s.get("points")
-            side_raw = (s.get("name") or s.get("label") or s.get("side") or "").lower()
-            side = "over" if "over" in side_raw or "más" in side_raw or "mas" in side_raw else (
-                   "under" if "under" in side_raw or "menos" in side_raw else None)
-            price = s.get("price") or s.get("odds") or s.get("decimal") or s.get("decimalOdds")
-            if line is not None and side is not None and price is not None:
-                sels.append({"line": line, "side": side, "price": price})
-        if sels:
-            out.append({"name": name, "selections": sels})
+    cats = _get(CONFIG["categories_path"], {"parentid": eid})
+    if not isinstance(cats, list):
+        return {"ok": False, "error": "categories endpoint no devolvió lista"}
+
+    # Pinguea la primera categoría para validar el path de games.
+    cat_id = cats[0].get("CategoryId") if cats else None
+    games = _get(CONFIG["games_path"],
+                 {"parentid": eid, "categoryInfoId": cat_id}) if cat_id else None
+    if games is not None and not isinstance(games, list):
+        return {"ok": False, "error": "games endpoint no devolvió lista"}
+
+    out = {
+        "discovered_at": datetime.now(timezone.utc).isoformat(),
+        "discovered_via": "codere_scraper._discover_endpoints (automatic HTTP)",
+        "base_url": CONFIG["base_url"],
+        # Campos canónicos esperados por consumers externos (smokes, followups):
+        "events_endpoint": (
+            f"{CONFIG['base_url']}/{CONFIG['events_path']}"
+            f"?parentId={{league_node_id}}&gameTypes="
+        ),
+        "markets_endpoint": (
+            f"{CONFIG['base_url']}/{CONFIG['games_path']}"
+            f"?parentid={{event_node_id}}&categoryInfoId={{category_id}}"
+        ),
+        "categories_endpoint": (
+            f"{CONFIG['base_url']}/{CONFIG['categories_path']}"
+            f"?parentid={{event_node_id}}"
+        ),
+        "laliga_node_id": league,
+        "sample_response_shapes": {
+            "events_first_item_keys": list(sample_event.keys())[:20],
+            "n_events_today": len(events),
+            "n_categories_first_event": len(cats),
+            "n_games_first_category": len(games or []),
+        },
+    }
+
+    outp = Path(CONFIG["endpoints_path"])
+    outp.parent.mkdir(parents=True, exist_ok=True)
+    outp.write_text(json.dumps(out, indent=2, ensure_ascii=False), encoding="utf-8")
+    log.info("Endpoints verificados + persistidos en %s "
+             "(events=%d, cats=%d, games_sample=%d)",
+             outp, len(events), len(cats), len(games or []))
     return out
 
 
-def _hours_before(now: datetime, start_iso: str | None) -> float | None:
-    if not start_iso:
+# ─────────────────────────────────────────────────────────────
+# Data layer
+# ─────────────────────────────────────────────────────────────
+
+_DATE_RE = re.compile(r"/Date\((-?\d+)\)/")
+
+
+def _parse_codere_date(raw: str | None) -> str | None:
+    """Parsea el formato raro `/Date(1777057200000)/` a ISO-8601 UTC."""
+    if not raw:
+        return None
+    m = _DATE_RE.search(raw)
+    if not m:
         return None
     try:
-        start = pd.to_datetime(start_iso, utc=True).to_pydatetime()
-    except Exception:
+        ms = int(m.group(1))
+    except ValueError:
         return None
-    return (start - now).total_seconds() / 3600.0
+    return datetime.fromtimestamp(ms / 1000.0, tz=timezone.utc).isoformat()
+
+
+def get_laliga_games() -> list[dict]:
+    """Devuelve partidos próximos de La Liga (Primera División)."""
+    data = _get(CONFIG["events_path"],
+                {"parentId": CONFIG["laliga_node_id"], "gameTypes": ""})
+    if not isinstance(data, list):
+        log.warning("GetEvents no devolvió lista: %r", type(data))
+        return []
+
+    games = []
+    for e in data:
+        eid = e.get("NodeId")
+        home = e.get("ParticipantHome")
+        away = e.get("ParticipantAway")
+        if not (eid and home and away):
+            continue
+        games.append({
+            "event_id": eid,
+            "home": home,
+            "away": away,
+            "start_iso": _parse_codere_date(e.get("StartDate")),
+            "league": e.get("LeagueName", ""),
+            "children_count": e.get("ChildrenCount"),
+        })
+    log.info("Partidos de La Liga encontrados: %d", len(games))
+    return games
+
+
+def _get_event_categories(event_id: str) -> list[dict]:
+    data = _get(CONFIG["categories_path"], {"parentid": event_id})
+    return data if isinstance(data, list) else []
+
+
+def _get_games_for_category(event_id: str, category_id: int | str) -> list[dict]:
+    data = _get(CONFIG["games_path"],
+                {"parentid": event_id, "categoryInfoId": category_id})
+    return data if isinstance(data, list) else []
+
+
+def _match_throw_in_name(name: str) -> bool:
+    """Heurística permisiva — Codere usa 'Total de Saques de Banda Más/Menos'
+    y 'Equipo con Más Saques de Banda'. Coincidencia por keywords lower-case.
+    """
+    low = (name or "").lower()
+    return "saque" in low and "banda" in low
+
+
+def _extract_line_from_spov(spov: str | None) -> float | None:
+    """El campo `Spov` del game trae la línea como '<Spov>41.5'. Extrae el
+    número. Devuelve None si no aplica (3-way market)."""
+    if not spov:
+        return None
+    m = re.search(r"(\d+(?:\.\d+)?)", spov)
+    if not m:
+        return None
+    try:
+        return float(m.group(1))
+    except ValueError:
+        return None
+
+
+def _classify_ou_selection(result_name: str) -> str | None:
+    """'Más de 41.5' -> over | 'Menos de 41.5' -> under."""
+    low = (result_name or "").lower()
+    if "más" in low or "mas" in low or "over" in low:
+        return "over"
+    if "menos" in low or "under" in low:
+        return "under"
+    return None
+
+
+def _classify_twm_selection(result_name: str, home: str, away: str) -> str | None:
+    """Para 'Equipo con Más Saques de Banda': 3 selecciones = home team name,
+    away team name, y 'Empate' (draw). Clasifica por match de nombre.
+    """
+    low = (result_name or "").lower()
+    if low in {"empate", "draw", "x"} or "empate" in low:
+        return "draw"
+    # Match por prefijo (Codere puede devolver 'Real Betis' exacto, o variantes)
+    if home and home.lower() in low:
+        return "home"
+    if away and away.lower() in low:
+        return "away"
+    # Si no matchea por nombre, como fallback usar orden (home primero)
+    return None
+
+
+def _find_throw_in_games(event_id: str) -> list[dict]:
+    """Recorre las categorías prioritarias del evento (ver
+    `CONFIG["priority_category_ids"]`) y filtra games cuyo Name contiene
+    'saque' + 'banda'.
+
+    Optimización: en lugar de las 19 categorías totales, sólo pedimos el
+    subset donde Codere suele colocar este mercado. Reduce wall-clock de
+    ~5min/partido a ~20s/partido cuando no hay mercado (caso mayoritario
+    lejos del kick-off).
+    """
+    cats = _get_event_categories(event_id)
+    if not cats:
+        return []
+    priority = set(CONFIG.get("priority_category_ids") or [])
+    # Preserve category order but filter to priority (+ always include
+    # IsRelevant=True for futureproofing — Codere marks PRINCIPALES relevant).
+    target_cats = [c for c in cats
+                   if c.get("CategoryId") in priority or c.get("IsRelevant")]
+    found = []
+    for c in target_cats:
+        cat_id = c.get("CategoryId")
+        if cat_id is None:
+            continue
+        _polite_sleep()
+        games = _get_games_for_category(event_id, cat_id)
+        for g in games:
+            if _match_throw_in_name(g.get("Name", "")):
+                found.append(g)
+    return found
+
+
+def _build_rows(
+    game_meta: dict,
+    throwin_games: list[dict],
+    markets: tuple[str, ...],
+    now_iso: str,
+) -> list[dict]:
+    """Construye filas unified-schema a partir de los `games` (mercados) de
+    saques de banda de un partido.
+    """
+    rows: list[dict] = []
+    home = game_meta["home"]
+    away = game_meta["away"]
+
+    for g in throwin_games:
+        name = g.get("Name") or ""
+        name_low = name.lower()
+        spov = g.get("Spov") or ""
+        line = _extract_line_from_spov(spov)
+        results = g.get("Results") or []
+
+        # O/U: nombre tipo "Total de Saques de Banda Más/Menos", con línea en Spov
+        is_over_under = ("más/menos" in name_low or "mas/menos" in name_low
+                         or "más\u002fmenos" in name_low or line is not None)
+        is_team_with_more = ("equipo con más" in name_low
+                             or "equipo con mas" in name_low)
+
+        if is_over_under and "total_over_under" in markets and line is not None:
+            for r in results:
+                sel_name = r.get("Name") or ""
+                side = _classify_ou_selection(sel_name)
+                price = r.get("Odd")
+                if side is None or price is None:
+                    continue
+                rows.append({
+                    "home_team": home,
+                    "away_team": away,
+                    "scraped_at": now_iso,
+                    "bookmaker": "codere",
+                    "market_type": "total_over_under",
+                    "line": float(line),
+                    "side": side,
+                    "odds": float(price),
+                    "raw_market_name": name,
+                    "raw_selection": sel_name,
+                })
+
+        if is_team_with_more and "team_with_more" in markets:
+            for r in results:
+                sel_name = r.get("Name") or ""
+                side = _classify_twm_selection(sel_name, home, away)
+                price = r.get("Odd")
+                if side is None or price is None:
+                    continue
+                rows.append({
+                    "home_team": home,
+                    "away_team": away,
+                    "scraped_at": now_iso,
+                    "bookmaker": "codere",
+                    "market_type": "team_with_more",
+                    "line": None,
+                    "side": side,
+                    "odds": float(price),
+                    "raw_market_name": name,
+                    "raw_selection": sel_name,
+                })
+
+    return rows
 
 
 def _append_to_history(df: pd.DataFrame) -> None:
+    """Append-only a `odds_history_path`. Preserva histórico para trazabilidad
+    temporal. Idempotente respecto al schema (match schema del parquet legacy).
+    """
     out = Path(CONFIG["odds_history_path"])
     out.parent.mkdir(parents=True, exist_ok=True)
     if out.exists():
         prev = pd.read_parquet(out)
         df = pd.concat([prev, df], ignore_index=True)
     df.to_parquet(out, index=False)
-    log.info("odds_history actualizado: %s (%d filas totales)", out, len(df))
+    log.info("odds_codere actualizado: %s (%d filas totales)", out, len(df))
 
 
 # ─────────────────────────────────────────────────────────────
-# MAIN
+# Main fetch
 # ─────────────────────────────────────────────────────────────
+
+def fetch_odds(
+    dry_run: bool = False,
+    markets: tuple[str, ...] = ("total_over_under", "team_with_more"),
+    max_matches: int | None = None,
+    force_rediscover: bool = False,
+) -> pd.DataFrame:
+    """Fetch de cuotas Codere para saques de banda en La Liga.
+
+    Parámetros:
+      dry_run:          Si True, no guarda a parquet (sólo stdout).
+      markets:          Subset a extraer ('total_over_under', 'team_with_more').
+      max_matches:      Límite de partidos a procesar (útil para smoke tests).
+      force_rediscover: Forzar refresh de la cache de endpoints.
+    """
+    discovery = _discover_endpoints(force=force_rediscover)
+    if not discovery.get("events_endpoint"):
+        log.error("Discovery falló: %s", discovery.get("error", "desconocido"))
+        return pd.DataFrame()
+
+    games = get_laliga_games()
+    if not games:
+        log.warning("No hay partidos de La Liga en Codere.")
+        return pd.DataFrame()
+
+    if max_matches is not None:
+        games = games[:max_matches]
+        log.info("max_matches=%d → procesando sólo los primeros %d partidos",
+                 max_matches, len(games))
+
+    now = datetime.now(timezone.utc)
+    now_iso = now.isoformat()
+    rows: list[dict] = []
+    stats = {"ok": 0, "missing": 0, "error": 0}
+
+    for game in games:
+        home, away, eid = game["home"], game["away"], game["event_id"]
+        start_iso = game["start_iso"]
+        hours_before = None
+        if start_iso:
+            try:
+                start = pd.to_datetime(start_iso, utc=True).to_pydatetime()
+                hours_before = (start - now).total_seconds() / 3600.0
+            except Exception:
+                pass
+
+        h_str = f"{hours_before:.1f}h" if hours_before is not None else "?"
+        log.info("Procesando: %s vs %s (eid=%s, ~%s antes del inicio)",
+                 home, away, eid, h_str)
+
+        _polite_sleep()
+        try:
+            throwin_games = _find_throw_in_games(eid)
+        except Exception as exc:
+            log.warning("  -> [error] %s vs %s: %s", home, away, exc)
+            stats["error"] += 1
+            continue
+
+        if not throwin_games:
+            log.info("  -> [missing] Sin mercados de saques de banda")
+            stats["missing"] += 1
+            continue
+
+        match_rows = _build_rows(game, throwin_games, markets, now_iso)
+        if not match_rows:
+            log.info("  -> [missing] Mercados de saques presentes pero sin "
+                     "selecciones parseables")
+            stats["missing"] += 1
+            continue
+
+        rows.extend(match_rows)
+        stats["ok"] += 1
+        n_ou = sum(1 for r in match_rows if r["market_type"] == "total_over_under")
+        n_twm = sum(1 for r in match_rows if r["market_type"] == "team_with_more")
+        ou_lines = sorted({r["line"] for r in match_rows
+                           if r["market_type"] == "total_over_under"})
+        line_str = (f"{ou_lines[0]}-{ou_lines[-1]} ({len(ou_lines)} líneas)"
+                    if ou_lines else "n/a")
+        log.info("  -> [ok] O/U: %d cuotas (líneas %s) | "
+                 "team_with_more: %d cuotas", n_ou, line_str, n_twm)
+
+    log.info("Resumen por partido: ok=%d missing=%d error=%d",
+             stats["ok"], stats["missing"], stats["error"])
+
+    df = pd.DataFrame(rows)
+
+    # Orden determinista
+    if len(df):
+        sort_cols = [c for c in
+                     ["home_team", "away_team", "market_type", "side", "line"]
+                     if c in df.columns]
+        df = df.sort_values(sort_cols, kind="stable").reset_index(drop=True)
+
+    n_matches = df[["home_team", "away_team"]].drop_duplicates().shape[0] if len(df) else 0
+    log.info("Total: %d cuotas extraídas para %d partidos", len(df), n_matches)
+
+    if dry_run:
+        if len(df):
+            print(df.to_string(index=False))
+        else:
+            print("Sin cuotas disponibles en este momento.")
+        return df
+
+    if len(df):
+        _append_to_history(df)
+
+    return df
+
+
+def list_games() -> None:
+    _discover_endpoints()
+    games = get_laliga_games()
+    if not games:
+        print("No hay partidos disponibles.")
+        return
+    for g in games:
+        print(f"eid={g['event_id']:>11}  "
+              f"{g['home'][:28]:<28} vs {g['away'][:28]:<28}  "
+              f"{g['start_iso'] or 'sin fecha'}")
+
 
 def main() -> None:
-    sys.stdout.reconfigure(encoding="utf-8")
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--discover", action="store_true",
-                        help="Modo discovery: abre Playwright e intercepta endpoints.")
+    try:
+        sys.stdout.reconfigure(encoding="utf-8")
+    except Exception:
+        pass
+    parser = argparse.ArgumentParser(description="Codere scraper - saques de banda La Liga")
     parser.add_argument("--dry-run", action="store_true",
-                        help="Fetch sin guardar a parquet.")
+                        help="Fetch sin guardar a parquet (debug)")
+    parser.add_argument("--list-games", action="store_true",
+                        help="Lista partidos activos de La Liga y sus NodeId")
+    parser.add_argument("--markets", default="all",
+                        choices=["all", "total_over_under", "team_with_more"],
+                        help="Qué mercado extraer (default: all)")
+    parser.add_argument("--max-matches", type=int, default=None,
+                        help="Límite de partidos a procesar (útil para smoke)")
+    parser.add_argument("--force-rediscover", action="store_true",
+                        help="Ignora la cache de endpoints y pinguea de nuevo")
+    # --discover se mantiene como alias por compat histórica con el scraper
+    # anterior basado en Playwright. Ahora sólo fuerza rediscover automático.
+    parser.add_argument("--discover", action="store_true",
+                        help="[deprecated] Alias de --force-rediscover. "
+                             "El discovery ahora es 100% automático y se ejecuta "
+                             "on-demand con TTL=7d sin Playwright.")
     args = parser.parse_args()
 
     if args.discover:
-        discover()
-    else:
-        fetch_odds(dry_run=args.dry_run)
+        log.info("--discover es alias deprecated de --force-rediscover.")
+        args.force_rediscover = True
+
+    if args.list_games:
+        list_games()
+        return
+
+    markets = (("total_over_under", "team_with_more")
+               if args.markets == "all" else (args.markets,))
+    fetch_odds(
+        dry_run=args.dry_run,
+        markets=markets,
+        max_matches=args.max_matches,
+        force_rediscover=args.force_rediscover,
+    )
 
 
 if __name__ == "__main__":

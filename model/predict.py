@@ -362,9 +362,31 @@ def main(
     all_scheduled: bool = False,
     output_path: str | None = None,
 ) -> None:
+    # Ensemble ponderado sobre el total (per-team sigue viniendo de lgbm_uniform).
+    # Las weights se aplican a (pred_home_model + pred_away_model) de cada modelo,
+    # no a per-team λ — esto preserva team_with_more (depende de pred_home_v2/pred_away_v2
+    # de uniform con bias). La assertion garantiza normalización.
+    # NOTA (change `revert-ensemble-run-mean-matched-test`, 2026-04-22): el ensemble
+    # 0.4/0.4/0.2 se revirtió a {1.0, 0.0, 0.0} tras REFUTAR la hipótesis de Poisson
+    # underdispersion (discovery/ensemble-underdispersion-verdict). La infra de 3
+    # modelos en el joblib se conserva + las columnas de trazabilidad siguen
+    # poblándose — con weights {1.0, 0.0, 0.0} pred_total_v2 == pred_total_uniform.
+    ENSEMBLE_WEIGHTS = {"lgbm_uniform": 1.0, "lgbm_decay": 0.0, "negbinom": 0.0}
+    assert abs(sum(ENSEMBLE_WEIGHTS.values()) - 1.0) < 1e-9, "ensemble weights no suman 1"
+
     artifact = load_model()
     model = artifact["model"]
     expected_features = artifact["features"]
+    # Backward compat: si el joblib es antiguo y no trae `models`, degradamos a uniform-only.
+    models_bundle = artifact.get("models")
+    negbinom_features = artifact.get("negbinom_features")
+    negbinom_train_medians = artifact.get("negbinom_train_medians") or {}
+    if not models_bundle or not negbinom_features:
+        log.warning(
+            "joblib sin 'models' dict o 'negbinom_features' — degradando a lgbm_uniform solo "
+            "(pred_total_v2 = pred_home_v2 + pred_away_v2 sin ensemble)"
+        )
+        models_bundle = None
 
     scheduled = load_scheduled_matches(date_filter, matchday_next, all_scheduled)
     if scheduled.empty:
@@ -435,6 +457,8 @@ def main(
         raise ValueError(f"Features ausentes tras construcción: {missing[:5]} ... ({len(missing)} total)")
     X = pred_df[expected_features].astype(float)
 
+    # Predicción base (lgbm_uniform). Este es el λ per-team que alimenta pred_home_v2 / pred_away_v2
+    # y, via Skellam, el market team_with_more. NO se toca.
     preds = model.predict(X)
 
     bias_table = load_team_bias(
@@ -448,6 +472,39 @@ def main(
         bias_table=bias_table,
     )
     pred_df["prediction"] = np.asarray(preds_cal, dtype=float)
+
+    # ── Ensemble per-model totals (si hay joblib moderno con los 3 modelos) ─────────
+    # Cada modelo predice per-team sin bias. Sumamos (home+away) para obtener el total
+    # del partido según ese modelo; luego blend ponderado define pred_total_v2.
+    # IMPORTANTE: el bias per-team solo se aplica a lgbm_uniform (arriba) porque pred_home_v2/away_v2
+    # quedan anclados a esa path (invariante team_with_more). El ensemble no sufre doble bias.
+    per_model_total_by_match: dict[str, pd.Series] = {}
+    if models_bundle is not None:
+        for model_name, mdl in models_bundle.items():
+            if model_name == "negbinom":
+                # Subset reducido + imputación con medianas de train (contrato del artifact).
+                X_nb_raw = pred_df[negbinom_features].astype(float)
+                for col, med in negbinom_train_medians.items():
+                    if col in X_nb_raw.columns:
+                        X_nb_raw[col] = X_nb_raw[col].fillna(med)
+                # sm.GLM fue entrenado con constante → hay que replicar sm.add_constant(..., has_constant='add').
+                try:
+                    import statsmodels.api as sm  # lazy import
+                    X_nb = sm.add_constant(X_nb_raw, has_constant="add")
+                except ImportError:
+                    log.warning("statsmodels no disponible en inferencia — ensemble cae a uniform+decay")
+                    continue
+                p_per_team = np.asarray(mdl.predict(X_nb), dtype=float)
+            else:
+                # lgbm_uniform / lgbm_decay usan el feature set completo.
+                p_per_team = np.asarray(mdl.predict(X), dtype=float)
+
+            tmp = pd.DataFrame({
+                "match_id": pred_df["match_id"].to_numpy(),
+                "p": p_per_team,
+            })
+            # Total = home + away (suma de las 2 filas por match_id — match único home/away).
+            per_model_total_by_match[model_name] = tmp.groupby("match_id")["p"].sum()
 
     wide = pred_df.pivot_table(
         index=["match_id", "match_date", "season"],
@@ -463,11 +520,57 @@ def main(
     out = wide.merge(names, on="match_id")
     out["pred_home_v2"] = out["pred_home_v2"].astype("float64")
     out["pred_away_v2"] = out["pred_away_v2"].astype("float64")
-    out["pred_total_v2"] = (out["pred_home_v2"] + out["pred_away_v2"]).astype("float64")
-    out = out[[
-        "match_id", "match_date", "season", "home_team", "away_team",
-        "pred_home_v2", "pred_away_v2", "pred_total_v2",
-    ]].sort_values(["match_date", "match_id"]).reset_index(drop=True)
+
+    # Total anclado a uniform+bias (retrocompat / baseline si falta ensemble).
+    pred_total_v2_baseline = (out["pred_home_v2"] + out["pred_away_v2"]).astype("float64")
+
+    if per_model_total_by_match and all(k in per_model_total_by_match for k in ENSEMBLE_WEIGHTS):
+        # Añadimos columnas trazabilidad (sin bias — raw per-model totals).
+        for model_name in ("lgbm_uniform", "lgbm_decay", "negbinom"):
+            col = f"pred_total_{model_name.replace('lgbm_', '')}"
+            out[col] = out["match_id"].map(per_model_total_by_match[model_name]).astype("float64")
+
+        # Si el ensemble está efectivamente deshabilitado (weights colapsan a
+        # lgbm_uniform=1.0), usamos el baseline biased (pred_home_v2+pred_away_v2)
+        # — idéntico al pipeline pre-ensemble y al pre-ensemble backup. Eso preserva
+        # invariante #3 original (pred_total_v2 == home+away) y el bias per-team.
+        _uniform_only = (
+            abs(ENSEMBLE_WEIGHTS.get("lgbm_uniform", 0.0) - 1.0) < 1e-9
+            and abs(ENSEMBLE_WEIGHTS.get("lgbm_decay", 0.0)) < 1e-9
+            and abs(ENSEMBLE_WEIGHTS.get("negbinom", 0.0)) < 1e-9
+        )
+        if _uniform_only:
+            out["pred_total_v2"] = pred_total_v2_baseline
+            log.info(
+                "ensemble disabled (weights=%s) → pred_total_v2 = pred_home_v2 + pred_away_v2 "
+                "(biased). Trace cols pred_total_{uniform,decay,negbinom} siguen sin bias.",
+                ENSEMBLE_WEIGHTS,
+            )
+        else:
+            ensemble_total = sum(
+                ENSEMBLE_WEIGHTS[m] * out["match_id"].map(per_model_total_by_match[m]).astype(float)
+                for m in ENSEMBLE_WEIGHTS
+            )
+            out["pred_total_v2"] = ensemble_total.astype("float64")
+            log.info(
+                "ensemble_totals weights=%s — mean |total_v2 - (home+away)|=%.4f",
+                ENSEMBLE_WEIGHTS,
+                float((out["pred_total_v2"] - pred_total_v2_baseline).abs().mean()),
+            )
+        ordered_cols = [
+            "match_id", "match_date", "season", "home_team", "away_team",
+            "pred_home_v2", "pred_away_v2", "pred_total_v2",
+            "pred_total_uniform", "pred_total_decay", "pred_total_negbinom",
+        ]
+    else:
+        # Backward-compat path: pred_total_v2 = pred_home + pred_away (sin ensemble).
+        out["pred_total_v2"] = pred_total_v2_baseline
+        ordered_cols = [
+            "match_id", "match_date", "season", "home_team", "away_team",
+            "pred_home_v2", "pred_away_v2", "pred_total_v2",
+        ]
+
+    out = out[ordered_cols].sort_values(["match_date", "match_id"]).reset_index(drop=True)
 
     out_dir = Path(output_path or CONFIG["output_dir"])
     out_dir.mkdir(parents=True, exist_ok=True)

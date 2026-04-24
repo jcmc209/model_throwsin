@@ -264,7 +264,15 @@ def build_sample_weights(train: pd.DataFrame, scheme: str) -> np.ndarray | None:
 # ─────────────────────────────────────────────────────────────
 
 def train_negbinom(train: pd.DataFrame, val: pd.DataFrame) -> dict:
-    """NegBinom sobre subconjunto reducido de features. Solo para comparar."""
+    """NegBinom sobre subconjunto reducido de features.
+
+    Devuelve `{"metrics": ..., "model": fitted_glm, "features": [5 cols], "train_medians": {...}}`
+    cuando el ajuste es exitoso — el modelo se persiste en el joblib para el ensemble
+    (ver `main()`). Si statsmodels no está instalado o el GLM falla, devuelve `{}`.
+
+    Las medianas de train se incluyen para reproducir exactamente la imputación de NaNs
+    en tiempo de inferencia (misma semántica que `fillna(train[reduced].median())`).
+    """
     try:
         import statsmodels.api as sm
     except ImportError:
@@ -279,9 +287,10 @@ def train_negbinom(train: pd.DataFrame, val: pd.DataFrame) -> dict:
         "std_throw_ins_total",
     ]
     reduced = [c for c in reduced if c in train.columns]
-    X_tr = sm.add_constant(train[reduced].fillna(train[reduced].median()))
+    train_medians = train[reduced].median()
+    X_tr = sm.add_constant(train[reduced].fillna(train_medians))
     y_tr = train[TARGET_COL]
-    X_va = sm.add_constant(val[reduced].fillna(train[reduced].median()), has_constant="add")
+    X_va = sm.add_constant(val[reduced].fillna(train_medians), has_constant="add")
 
     try:
         with warnings.catch_warnings():
@@ -292,7 +301,13 @@ def train_negbinom(train: pd.DataFrame, val: pd.DataFrame) -> dict:
         return {}
 
     pred = model.predict(X_va).to_numpy()
-    return evaluate(val[TARGET_COL], pred, {"team": val["team_id"], "season": val["season"]})
+    metrics = evaluate(val[TARGET_COL], pred, {"team": val["team_id"], "season": val["season"]})
+    return {
+        "metrics": metrics,
+        "model": model,
+        "features": list(reduced),
+        "train_medians": {c: float(train_medians[c]) for c in reduced},
+    }
 
 
 # ─────────────────────────────────────────────────────────────
@@ -764,10 +779,18 @@ def main(weights_mode: str = "both", features_mode: str = "shap30") -> None:
         models[scheme] = model
 
     log.info("Entrenando NegBinom sanity check ...")
-    negbinom_metrics = train_negbinom(train, val)
-    if negbinom_metrics:
-        results["negbinom"] = negbinom_metrics
-        log.info("  negbinom → MAE %.4f | RMSE %.4f", negbinom_metrics["mae"], negbinom_metrics["rmse"])
+    negbinom_out = train_negbinom(train, val)
+    negbinom_model = None
+    negbinom_features: list[str] = []
+    negbinom_train_medians: dict[str, float] = {}
+    if negbinom_out:
+        # Nuevo contrato: dict con keys metrics/model/features/train_medians.
+        nb_metrics = negbinom_out["metrics"]
+        negbinom_model = negbinom_out["model"]
+        negbinom_features = list(negbinom_out["features"])
+        negbinom_train_medians = dict(negbinom_out["train_medians"])
+        results["negbinom"] = nb_metrics
+        log.info("  negbinom → MAE %.4f | RMSE %.4f", nb_metrics["mae"], nb_metrics["rmse"])
 
     # Selección del mejor
     best_scheme = min(models, key=lambda s: results[f"lgbm_{s}"]["mae"])
@@ -786,11 +809,23 @@ def main(weights_mode: str = "both", features_mode: str = "shap30") -> None:
     model_dir = Path(CONFIG["model_path"]).parent
     model_dir.mkdir(parents=True, exist_ok=True)
 
+    # Ensemble-ready artifact: se preserva `model` (backward compat con predict.py)
+    # y además se persisten los 3 modelos bajo `models` (LGBM uniform + LGBM decay + NegBinom GLM)
+    # para el ensemble ponderado que computa el total en inferencia.
+    models_bundle: dict[str, object] = {}
+    for scheme_name, mdl in models.items():
+        models_bundle[f"lgbm_{scheme_name}"] = mdl
+    if negbinom_model is not None:
+        models_bundle["negbinom"] = negbinom_model
+
     artifact = {
         "model": best_model,
+        "models": models_bundle,
         "version": "v1",
         "trained_at": datetime.utcnow().isoformat(timespec="seconds"),
         "features": feature_cols,
+        "negbinom_features": negbinom_features,
+        "negbinom_train_medians": negbinom_train_medians,
         "params": dict(CONFIG["lgb_params"]),
         "val_mae": best_mae,
         "val_rmse": results[f"lgbm_{best_scheme}"]["rmse"],

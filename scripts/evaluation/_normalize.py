@@ -14,9 +14,14 @@ import re
 import unicodedata
 
 _CLUB_SUFFIX_RE = re.compile(r"\s+(UD|FC|CF|CD|SD|RCD|RC)\b", flags=re.IGNORECASE)
+# Prefijo "FC " al inicio (p.ej. "FC Barcelona") — strip explícito ya que el
+# regex de sufijos solo quita " FC" al final.
+_CLUB_PREFIX_RE = re.compile(r"^(FC|CF|CD|SD|RCD|RC|UD)\s+", flags=re.IGNORECASE)
 _TEAM_ALIASES: dict[str, str] = {
     "atletico madrid": "atletico",
+    "atletico de madrid": "atletico",
     "deportivo alaves": "alaves",
+    "celta de vigo": "celta vigo",
 }
 
 
@@ -31,6 +36,7 @@ def _normalize_team_name(name: str) -> str:
     stripped = unicodedata.normalize("NFKD", name)
     stripped = "".join(ch for ch in stripped if not unicodedata.combining(ch))
     stripped = stripped.strip().lower()
+    stripped = _CLUB_PREFIX_RE.sub("", stripped)
     stripped = _CLUB_SUFFIX_RE.sub("", stripped)
     stripped = re.sub(r"\s+", " ", stripped).strip()
     return _TEAM_ALIASES.get(stripped, stripped)

@@ -74,8 +74,11 @@ REF_EWMA_ALPHA: float = 0.3
 # Actualizar ejecutando: python scripts/shap_analysis.py (si se añaden nuevas temporadas).
 SHAP_SELECTED_FEATURES: list[str] = [
     # event-based (derivadas de all_events, vínculo mecánico directo a saques)
-    "std_y",                          # dispersión lateral — máxima importancia SHAP
-    "opp_std_y",                      # dispersión lateral del rival
+    # Nota: `std_y` y `opp_std_y` crudas quedan excluidas — computadas sobre los
+    # eventos del partido objetivo (leak de target). En su lugar se usan las
+    # variantes EWMA α=0.3 que consumen solo partidos previos vía shift(1).
+    "ewma_alpha03_std_y",             # dispersión lateral — EWMA α=0.3 (prior-only)
+    "opp_ewma_alpha03_std_y",         # dispersión lateral del rival — EWMA α=0.3 (prior-only)
     "std_heads",                      # cabezazos season-to-date
     "std_avg_pass_length",            # longitud media de pase season-to-date
     "std_long_balls",                 # balones largos season-to-date
