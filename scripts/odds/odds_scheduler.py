@@ -8,7 +8,8 @@ Bucle ligero que:
   3. Por cada partido, comprueba si estamos dentro de una ventana objetivo
      (p. ej. −9h ±5min, −3h ±5min, −2h ±5min, −1h ±5min por defecto).
   4. Si sí, lanza CADA scraper configurado en `CONFIG["scrapers"]` (modo fetch)
-     secuencialmente — actualmente 22bet + Codere (ambos vía API HTTP directa).
+     secuencialmente — actualmente sólo 22bet (Codere temporalmente deshabilitado
+     pendiente de re-bootstrap de endpoints; ver followup/restore-codere-scraper).
   5. Mantiene un `state.json` con qué capturas ya hicimos para no duplicar.
   6. Duerme 5 minutos y repite.
 
@@ -51,12 +52,12 @@ CONFIG = {
     # Un fallo en uno NO bloquea a los demás (ver `_trigger_scraper()`).
     "scrapers": [
         ["scripts/odds/22bet_scraper.py"],
-        # Codere: re-habilitado 2026-04-24 (change `automate-codere-discovery`).
-        # Usa API HTTP directa (sin Playwright, sin interacción humana). El
-        # discovery de endpoints es automático con TTL=7d; cache en
-        # `data/reference/codere_endpoints.json`. Ver `followup/restore-codere-scraper`
-        # como referencia histórica.
-        ["scripts/odds/codere_scraper.py"],
+        # Codere: temporalmente deshabilitado — requiere re-bootstrap de
+        # endpoints (human-interactive discovery via Playwright + edición
+        # manual del JSON). Ver `followup/restore-codere-scraper` en engram.
+        # Para re-habilitar, descomentar la línea siguiente una vez exista
+        # `data/reference/codere_endpoints.json` con events_endpoint + markets_endpoint:
+        # ["scripts/odds/codere_scraper.py"],
     ],
     "tz_local": "Europe/Madrid",  # kick-offs en hora peninsular
     "sleep_seconds": 300,         # 5 min
