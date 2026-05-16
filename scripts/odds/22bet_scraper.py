@@ -1,6 +1,6 @@
 """
 22bet - Scraper de Saques de Banda - La Liga España
-API: https://22bet92.com/service-api/LineFeed/
+API: https://22play22.com/service-api/LineFeed/
 
 Estructura descubierta (2026):
   - GetChampZip?champ=127733          -> partidos de La Liga (Value.G[])
@@ -46,6 +46,9 @@ from pathlib import Path
 import pandas as pd
 import requests
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+from scripts.odds import db
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
@@ -57,7 +60,7 @@ logging.basicConfig(
 log = logging.getLogger("22bet_scraper")
 
 CONFIG = {
-    "base_url": "https://22bet92.com/service-api/LineFeed",
+    "base_url": "https://22play22.com/service-api/LineFeed",
     "laliga_champ_id": 127733,
     "throw_in_ti": 55,
     # Mercado Total (Over/Under)
@@ -105,8 +108,8 @@ HEADERS = {
     ),
     "Accept": "application/json, text/plain, */*",
     "Accept-Language": "es-ES,es;q=0.9",
-    "Referer": "https://22bet92.com/",
-    "Origin": "https://22bet92.com",
+    "Referer": "https://22play22.com/",
+    "Origin": "https://22play22.com",
 }
 
 
@@ -519,6 +522,7 @@ def fetch_odds(
 
     if len(df):
         _append_to_history(df)
+        db.upsert_odds(df)
 
     return df
 

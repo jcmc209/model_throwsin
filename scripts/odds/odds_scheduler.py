@@ -34,6 +34,9 @@ from pathlib import Path
 
 import pandas as pd
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+from scripts.odds import db
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
@@ -104,6 +107,8 @@ def load_scheduled_next_hours(hours_ahead: float = 4.0) -> pd.DataFrame:
 # ─────────────────────────────────────────────────────────────
 
 def _load_state() -> dict:
+    if db.is_available():
+        return db.load_state()
     p = Path(CONFIG["state_path"])
     if not p.exists():
         return {}
@@ -112,6 +117,9 @@ def _load_state() -> dict:
 
 
 def _save_state(state: dict) -> None:
+    if db.is_available():
+        db.save_state(state)
+        return
     p = Path(CONFIG["state_path"])
     p.parent.mkdir(parents=True, exist_ok=True)
     with open(p, "w", encoding="utf-8") as f:
@@ -221,6 +229,7 @@ def main() -> None:
 
     windows = sorted({int(w.strip()) for w in args.windows.split(",") if w.strip()})
     log.info("Ventanas objetivo: %s horas antes del kickoff", windows)
+    db.init_tables()
 
     if args.once:
         run_iteration(windows)
