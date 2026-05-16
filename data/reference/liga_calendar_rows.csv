@@ -1235,7 +1235,7 @@ event_id,home_team,away_team,match_date,match_time,competition,round,status,home
 14083255,Valencia,Girona FC,2026-04-26,19:00:00,La Liga,32,scheduled,,,2025/26,2026-03-20 10:36:57.104+00,
 14083256,Real Sociedad,Real Madrid,2025-09-13,14:15:00,La Liga,4,finished,1.0,2.0,2025/26,2026-03-20 10:35:49.565+00,
 14083257,Deportivo Alavés,Getafe,2026-02-08,13:00:00,La Liga,23,finished,0.0,2.0,2025/26,2026-03-20 10:37:32.738+00,
-14083258,Athletic Club,Osasuna,2026-04-22,19:00:00,La Liga,33,scheduled,,,2025/26,2026-03-20 10:36:31.022+00,
+14083258,Athletic Club,Osasuna,2026-04-22,19:00:00,La Liga,33,scheduled,,,2025/26,2026-03-20 10:36:31.022+00,Valentín Pizarro Gómez
 14083259,Deportivo Alavés,Sevilla,2025-09-20,16:30:00,La Liga,5,finished,1.0,2.0,2025/26,2026-03-20 10:37:32.738+00,
 14083260,Athletic Club,Levante UD,2026-02-08,15:15:00,La Liga,23,finished,4.0,2.0,2025/26,2026-03-20 10:37:48.504+00,
 14083261,Barcelona,Celta Vigo,2026-04-22,19:00:00,La Liga,33,scheduled,,,2025/26,2026-03-20 10:35:38.892+00,
@@ -1244,19 +1244,19 @@ event_id,home_team,away_team,match_date,match_time,competition,round,status,home
 14083265,Levante UD,Sevilla,2026-04-22,19:00:00,La Liga,33,scheduled,,,2025/26,2026-03-20 10:37:48.89+00,
 14083266,Real Betis,Real Sociedad,2025-09-19,19:00:00,La Liga,5,finished,3.0,1.0,2025/26,2026-03-20 10:35:49.565+00,
 14083269,Barcelona,Mallorca,2026-02-07,15:15:00,La Liga,23,finished,3.0,0.0,2025/26,2026-03-20 10:37:22.228+00,
-14083270,Mallorca,Valencia,2026-04-22,19:00:00,La Liga,33,scheduled,,,2025/26,2026-03-20 10:37:22.628+00,
+14083270,Mallorca,Valencia,2026-04-22,19:00:00,La Liga,33,scheduled,,,2025/26,2026-03-20 10:37:22.628+00,César Soto Grado
 14083275,Elche,Real Oviedo,2025-09-21,16:30:00,La Liga,5,finished,1.0,0.0,2025/26,2026-03-20 10:37:55.924+00,
 14083279,Celta Vigo,Osasuna,2026-02-06,20:00:00,La Liga,23,finished,1.0,2.0,2025/26,2026-03-20 10:36:30.614+00,
 14083282,Real Oviedo,Villarreal,2026-04-22,19:00:00,La Liga,33,scheduled,,,2025/26,2026-03-20 10:37:56.311+00,
 14083285,Girona FC,Levante UD,2025-09-20,12:00:00,La Liga,5,finished,0.0,4.0,2025/26,2026-03-20 10:37:48.504+00,
 14083292,Real Sociedad,Elche,2026-02-07,20:00:00,La Liga,23,finished,3.0,1.0,2025/26,2026-03-20 10:37:40.685+00,
-14083295,Real Madrid,Deportivo Alavés,2026-04-22,19:00:00,La Liga,33,scheduled,,,2025/26,2026-03-20 10:37:33.116+00,
+14083295,Real Madrid,Deportivo Alavés,2026-04-22,19:00:00,La Liga,33,scheduled,,,2025/26,2026-03-20 10:37:33.116+00,Juan Martínez Munuera
 14083298,Valencia,Athletic Club,2025-09-20,19:00:00,La Liga,5,finished,2.0,0.0,2025/26,2026-03-20 10:36:56.738+00,
 14083303,Villarreal,Espanyol,2026-02-09,20:00:00,La Liga,23,finished,4.0,1.0,2025/26,2026-03-20 10:35:59.246+00,
 14083306,Elche,Atlético Madrid,2026-04-22,19:00:00,La Liga,33,scheduled,,,2025/26,2026-03-20 10:37:41.037+00,
 14083310,Mallorca,Atlético Madrid,2025-09-21,14:15:00,La Liga,5,finished,1.0,1.0,2025/26,2026-03-20 10:37:22.228+00,
 14083315,Sevilla,Girona FC,2026-02-08,15:15:00,La Liga,23,finished,1.0,1.0,2025/26,2026-03-20 10:37:09.34+00,
-14083318,Girona FC,Real Betis,2026-04-22,19:00:00,La Liga,33,scheduled,,,2025/26,2026-03-20 10:36:41.922+00,
+14083318,Girona FC,Real Betis,2026-04-22,19:00:00,La Liga,33,scheduled,,,2025/26,2026-03-20 10:36:41.922+00,Iosu Galech Apezteguía
 14083322,Rayo Vallecano,Celta Vigo,2025-09-21,12:00:00,La Liga,5,finished,1.0,1.0,2025/26,2026-03-20 10:36:47.809+00,
 14083327,Valencia,Real Madrid,2026-02-08,20:00:00,La Liga,23,finished,0.0,2.0,2025/26,2026-03-20 10:36:56.738+00,
 14083330,Rayo Vallecano,Espanyol,2026-04-22,19:00:00,La Liga,33,scheduled,,,2025/26,2026-03-20 10:36:48.158+00,

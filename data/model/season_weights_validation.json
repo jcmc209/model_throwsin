@@ -1,0 +1,102 @@
+{
+  "change": "season-weighted-training",
+  "baseline": {
+    "label": "baseline_auto",
+    "n_features": 37,
+    "n_complete_folds": 4,
+    "mean_val_mae": 3.9321,
+    "std_val_mae": 0.1367,
+    "folds": [
+      {
+        "name": "fold0_21-22",
+        "val_season": "2021/2022",
+        "is_partial": false,
+        "val_mae": 3.9793
+      },
+      {
+        "name": "fold1_22-23",
+        "val_season": "2022/2023",
+        "is_partial": false,
+        "val_mae": 3.7264
+      },
+      {
+        "name": "fold2_23-24",
+        "val_season": "2023/2024",
+        "is_partial": false,
+        "val_mae": 4.1054
+      },
+      {
+        "name": "fold3_24-25",
+        "val_season": "2024/2025",
+        "is_partial": false,
+        "val_mae": 3.9174
+      },
+      {
+        "name": "fold4_25-26",
+        "val_season": "2025/2026",
+        "is_partial": true,
+        "val_mae": 3.7869
+      }
+    ]
+  },
+  "candidate": {
+    "label": "candidate_steeper",
+    "n_features": 37,
+    "n_complete_folds": 4,
+    "mean_val_mae": 3.944,
+    "std_val_mae": 0.1302,
+    "folds": [
+      {
+        "name": "fold0_21-22",
+        "val_season": "2021/2022",
+        "is_partial": false,
+        "val_mae": 4.0088
+      },
+      {
+        "name": "fold1_22-23",
+        "val_season": "2022/2023",
+        "is_partial": false,
+        "val_mae": 3.7524
+      },
+      {
+        "name": "fold2_23-24",
+        "val_season": "2023/2024",
+        "is_partial": false,
+        "val_mae": 4.1045
+      },
+      {
+        "name": "fold3_24-25",
+        "val_season": "2024/2025",
+        "is_partial": false,
+        "val_mae": 3.9102
+      },
+      {
+        "name": "fold4_25-26",
+        "val_season": "2025/2026",
+        "is_partial": true,
+        "val_mae": 3.7813
+      }
+    ]
+  },
+  "bootstrap": {
+    "label_a": "baseline_auto",
+    "label_b": "candidate_steeper",
+    "delta_mean": 0.0118,
+    "delta_ci_low": 0.0005,
+    "delta_ci_high": 0.0229,
+    "p_value": 0.02,
+    "significant": true,
+    "ci_halfwidth": 0.0112,
+    "n_matches": 1519,
+    "n_rows": 3038
+  },
+  "candidate_weights": {
+    "2019/2020": 0.1,
+    "2020/2021": 0.2,
+    "2021/2022": 0.2,
+    "2022/2023": 0.4,
+    "2023/2024": 0.7,
+    "2024/2025": 1.0
+  },
+  "verdict": "✗ No mejora — revisar enfoque antes de reentrenar"
+}

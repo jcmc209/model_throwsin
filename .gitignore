@@ -12,24 +12,40 @@ dist/
 build/
 .eggs/
 
-# ── Secretos ──────────────────────────────────────────────────
+# ── Secretos y configuración sensible ─────────────────────────
 .env
 # .env.example sí se sube (no contiene valores reales)
+data/reference/codere_endpoints.json
 
-# ── Datos scrapeados (pesados, regenerables con whoscored_scraper.py) ──
+# ── Datos scrapeados de WhoScored (pesados, regenerables) ─────
 data/whoscored_laliga/
+!data/whoscored_laliga/.gitkeep
 
-# ── Artefactos del modelo (derivados, regenerables con model/train.py) ──
+# ── Artefactos del modelo (derivados, regenerables con train.py) ──
 data/model/dataset.parquet
-data/model/model_v1.joblib
-data/model/predictions_*.parquet
-# feature_importance.csv y metrics_v1.json SÍ se suben (livianos e informativos)
+data/model/dataset_match.parquet
+data/model/*.joblib
+data/model/optuna_study.db
+data/model/predictions/
+data/model/market_eval/
 
-# ── Datos de referencia voluminosos (se regeneran con weather_fetcher.py) ──
+# Backups — cualquier variante de nombre (_bak.ext o .ext.bak)
+data/model/*.bak
+data/model/*_bak.*
+data/model/_investigation_*
+
+# ── Datos de referencia voluminosos o scrapeados ──────────────
 data/reference/weather.parquet
+data/reference/odds_*.parquet
+data/reference/_*
+data/reference/event_stats.parquet
+data/reference/referee_stats.parquet
 
 # ── Logs ──────────────────────────────────────────────────────
 *.log
+data/automation/*.log
+logs/
+!logs/.gitkeep
 
 # ── Jupyter checkpoints ───────────────────────────────────────
 .ipynb_checkpoints/
@@ -48,6 +64,6 @@ desktop.ini
 playwright-report/
 test-results/
 
-# ── Infraestructura interna de Cursor ─────────────────────────
+# ── Infraestructura interna (SDD / agentes) ───────────────────
 openspec/
 .atl/

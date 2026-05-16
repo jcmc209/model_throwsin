@@ -13,8 +13,8 @@ Output:
     throw_ins_total_match  int32     ← suma home + away
 
 Uso:
-  python scripts/referee_extractor.py
-  python scripts/referee_extractor.py --output data/reference/referee_stats.parquet
+  python scripts/ingestion/referee_extractor.py
+  python scripts/ingestion/referee_extractor.py --output data/reference/referee_stats.parquet
 """
 from __future__ import annotations
 
