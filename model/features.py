@@ -62,6 +62,13 @@ EVENT_FEATURE_SOURCE_COLS: list[str] = [
     # tempo / game-state histórico
     "total_events",      # nº total de eventos del equipo (proxy de tempo/intensidad)
     "leading_pct",       # fracción del partido en que el equipo iba ganando (r=-0.22 con throw_ins)
+    # B4: high-press recoveries (BallRecovery con x > 60 — coordenadas team-relative)
+    "press_recoveries_high",
+    # B1: throw-in zone ratios (fracción de saques en tercio defensivo/atacante)
+    "throw_in_def_zone_pct",
+    "throw_in_att_zone_pct",
+    # B5: throw-in retention rolling10 (media de retained_possession_3)
+    "throw_in_retention3_pct",
 ]
 
 ROLLING_WINDOWS: tuple[int, ...] = (3, 5, 10)
@@ -74,11 +81,11 @@ REF_EWMA_ALPHA: float = 0.3
 # Actualizar ejecutando: python scripts/shap_analysis.py (si se añaden nuevas temporadas).
 SHAP_SELECTED_FEATURES: list[str] = [
     # event-based (derivadas de all_events, vínculo mecánico directo a saques)
-    # Nota: `std_y` y `opp_std_y` crudas quedan excluidas — computadas sobre los
-    # eventos del partido objetivo (leak de target). En su lugar se usan las
-    # variantes EWMA α=0.3 que consumen solo partidos previos vía shift(1).
+    # IMPORTANTE: `std_y`, `heads`, `wide_events`, `long_balls` etc. CRUDAS quedan
+    # excluidas — son stats del partido actual (leakage). Solo se usan variantes
+    # rolling/EWMA/STD que consumen únicamente partidos previos vía shift(1).
     "ewma_alpha03_std_y",             # dispersión lateral — EWMA α=0.3 (prior-only)
-    "opp_ewma_alpha03_std_y",         # dispersión lateral del rival — EWMA α=0.3 (prior-only)
+    "opp_ewma_alpha03_std_y",         # dispersión lateral del rival — EWMA α=0.3
     "std_heads",                      # cabezazos season-to-date
     "std_avg_pass_length",            # longitud media de pase season-to-date
     "std_long_balls",                 # balones largos season-to-date
@@ -92,16 +99,16 @@ SHAP_SELECTED_FEATURES: list[str] = [
     "opp_rolling3_wide_ratio",        # % acciones por banda del rival (rolling 3)
     "std_wide_ratio",                 # % acciones por banda season-to-date
     "opp_ewma_alpha05_heads",         # cabezazos del rival (EWMA α=0.5)
-    # wide-atomic (Bloque A — toques/regates/duelos en zona lateral)
-    "opp_rolling10_balltouch_wide",   # toques en banda del rival (rolling 10) — Δ -0.0041
-    "ewma_alpha03_balltouch_wide",    # toques en banda propios (EWMA α=0.3)    — Δ -0.0009
+    # wide-atomic
+    "opp_rolling10_balltouch_wide",   # toques en banda del rival (rolling 10)
+    "ewma_alpha03_balltouch_wide",    # toques en banda propios (EWMA α=0.3)
     # autorregresivo (throw-ins históricos)
     "rolling5_throw_ins_total",
     "std_throw_ins_total",
     "opp_ewma_alpha03_throw_ins_total",
     "opp_rolling5_throw_ins_total",
     "rolling10_throw_ins_total",
-    # aerials (proxy indirecto — superviviente del SHAP anterior)
+    # aerials
     "opp_std_aerials_total",
     "opp_rolling10_aerials_total",
     "opp_rolling3_aerials_total",
@@ -120,6 +127,16 @@ SHAP_SELECTED_FEATURES: list[str] = [
     "opp_ewma_alpha05_fouls_committed",
     # árbitro
     "ref_rolling5_throw_ins",
+    # ── NUEVAS FEATURES v2 (zona de saque + retención) ────────────
+    "rolling5_throw_in_def_zone_pct",
+    "rolling10_throw_in_def_zone_pct",
+    "ewma_alpha03_throw_in_def_zone_pct",
+    "rolling5_throw_in_att_zone_pct",
+    "opp_rolling5_throw_in_def_zone_pct",
+    "opp_rolling10_throw_in_def_zone_pct",
+    "opp_std_throw_in_retention3_pct",
+    "rolling10_throw_in_retention3_pct",
+    "opp_rolling5_press_recoveries_high",
 ]
 
 
@@ -588,4 +605,4 @@ def get_feature_columns(df: pd.DataFrame) -> list[str]:
         "venue",
         "stadium_team_id",
     }
-    return [c for c in df.columns if c not in drop_cols and not np.issubdtype(df[c].dtype, np.dtype("O"))]
+    return [c for c in df.columns if c not in drop_cols and pd.api.types.is_numeric_dtype(df[c])]
