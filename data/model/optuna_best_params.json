@@ -1,19 +1,19 @@
 {
-  "best_trial": 51,
-  "best_mean_val_mae": 3.93,
-  "baseline_mean_val_mae": 3.9478,
-  "delta_mean": -0.0178,
-  "delta_ci_low": -0.0343,
-  "delta_ci_high": -0.0018,
-  "p_value": 0.016,
-  "significant": true,
+  "best_trial": 26,
+  "best_mean_val_mae": 4.2468,
+  "baseline_mean_val_mae": 4.2599,
+  "delta_mean": -0.0132,
+  "delta_ci_low": -0.0274,
+  "delta_ci_high": 0.0006,
+  "p_value": 0.0295,
+  "significant": false,
   "params": {
-    "num_leaves": 4,
-    "min_child_samples": 115,
-    "feature_fraction": 0.5433683703991158,
-    "bagging_fraction": 0.7119823679548885,
-    "reg_lambda": 8.104601114330684,
-    "reg_alpha": 2.830138544956674,
-    "learning_rate": 0.04916108283332978
+    "num_leaves": 14,
+    "min_child_samples": 143,
+    "feature_fraction": 0.5379259337101081,
+    "bagging_fraction": 0.7665615175305345,
+    "reg_lambda": 1.5886183039311237,
+    "reg_alpha": 1.693724098925221,
+    "learning_rate": 0.012150440146017197
   }
 }

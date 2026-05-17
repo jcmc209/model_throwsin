@@ -207,6 +207,9 @@ def _trigger_scraper() -> None:
             else:
                 log.info("Scraper %s OK (%d bytes stdout)",
                          script_name, len(result.stdout))
+                if result.stderr:
+                    log.info("Scraper %s output:\n%s",
+                             script_name, result.stderr[-2000:])
         except subprocess.TimeoutExpired:
             log.warning("Scraper %s timeout (>%ds) — continúo con el resto.",
                         script_name, timeout)

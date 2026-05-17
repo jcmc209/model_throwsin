@@ -49,6 +49,7 @@ log = logging.getLogger("event_aggregator")
 
 CONFIG = {
     "events_glob": "data/whoscored_laliga/**/*_all_events.parquet",
+    "throw_ins_glob": "data/whoscored_laliga/**/*_throw_ins.parquet",
     "output_path": "data/reference/event_stats.parquet",
 }
 
@@ -70,6 +71,13 @@ EVENT_COLS = [
     # tempo / game-state
     "total_events",
     "leading_pct",
+    # B4: high-press recoveries (BallRecovery con x > 60)
+    "press_recoveries_high",
+    # B1: throw-in zone ratios
+    "throw_in_def_zone_pct",
+    "throw_in_att_zone_pct",
+    # B5: throw-in retention (3 eventos)
+    "throw_in_retention3_pct",
 ]
 
 
@@ -106,6 +114,11 @@ def aggregate_events(events: pd.DataFrame) -> pd.DataFrame:
     events["is_balltouch_wide"] = ((events["event_type"] == "BallTouch") & events["is_wide"]).astype(int)
     events["is_foul_wide"] = ((events["event_type"] == "Foul") & events["is_wide"]).astype(int)
 
+    # B4: high-press recoveries — BallRecovery en campo rival (x > 60)
+    events["is_high_press_recovery"] = (
+        (events["event_type"] == "BallRecovery") & (events["x"] > 60)
+    ).astype(int)
+
     def std_y_safe(s: pd.Series) -> float:
         return float(s.std(ddof=0)) if len(s) > 1 else 0.0
 
@@ -125,6 +138,7 @@ def aggregate_events(events: pd.DataFrame) -> pd.DataFrame:
         "takeon_wide": grp["is_takeon_wide"].sum().astype("int32"),
         "balltouch_wide": grp["is_balltouch_wide"].sum().astype("int32"),
         "foul_wide": grp["is_foul_wide"].sum().astype("int32"),
+        "press_recoveries_high": grp["is_high_press_recovery"].sum().astype("int32"),
     }).reset_index()
 
     agg["wide_ratio"] = (agg["wide_events"] / agg["total_events"]).astype("float32")
@@ -134,7 +148,11 @@ def aggregate_events(events: pd.DataFrame) -> pd.DataFrame:
     agg["avg_pass_length"] = agg["avg_pass_length"].fillna(pl_median)
 
     agg["total_events"] = agg["total_events"].astype("int32")
-    return agg[["match_id", "team_id"] + [c for c in EVENT_COLS if c != "leading_pct"]]
+    # Excluye leading_pct (se añade después via compute_game_state_stats)
+    # y las columnas de throw_ins (se añaden después via load_throw_ins)
+    _throw_ins_cols = {"throw_in_def_zone_pct", "throw_in_att_zone_pct", "throw_in_retention3_pct"}
+    base_cols = [c for c in EVENT_COLS if c not in {"leading_pct"} | _throw_ins_cols]
+    return agg[["match_id", "team_id"] + base_cols]
 
 
 def compute_game_state_stats(events: pd.DataFrame) -> pd.DataFrame:
@@ -225,6 +243,52 @@ def compute_game_state_stats(events: pd.DataFrame) -> pd.DataFrame:
     return gs_df
 
 
+def load_throw_ins() -> pd.DataFrame:
+    """
+    Agrega estadísticas de throw_ins por (match_id, team_id).
+
+    Columnas generadas:
+      - throw_in_def_zone_pct   — fracción de saques en tercio defensivo
+      - throw_in_att_zone_pct   — fracción de saques en tercio atacante
+      - throw_in_retention3_pct — media de retained_possession_3 (retención en 3 eventos)
+    """
+    files = sorted(glob.glob(CONFIG["throw_ins_glob"], recursive=True))
+    if not files:
+        log.warning("No se encontraron throw_ins parquets en %s", CONFIG["throw_ins_glob"])
+        return pd.DataFrame()
+
+    log.info("Cargando %d archivos throw_ins ...", len(files))
+    dfs = []
+    for f in files:
+        try:
+            dfs.append(pd.read_parquet(
+                f, columns=["match_id", "team_id", "field_zone", "retained_possession_3"]
+            ))
+        except Exception as exc:  # columnas faltantes en un archivo concreto
+            log.warning("  Saltando %s: %s", f, exc)
+
+    if not dfs:
+        return pd.DataFrame()
+
+    ti = pd.concat(dfs, ignore_index=True)
+    log.info("throw_ins cargados: %d filas, %d partidos", len(ti), ti["match_id"].nunique())
+
+    agg = (
+        ti.groupby(["match_id", "team_id"])
+        .agg(
+            throw_in_def_zone_pct=("field_zone", lambda x: (x == "defensive_third").mean()),
+            throw_in_att_zone_pct=("field_zone", lambda x: (x == "attacking_third").mean()),
+            throw_in_retention3_pct=("retained_possession_3", "mean"),
+        )
+        .reset_index()
+    )
+
+    for col in ("throw_in_def_zone_pct", "throw_in_att_zone_pct", "throw_in_retention3_pct"):
+        agg[col] = agg[col].astype("float32")
+
+    return agg
+
+
 def validate(agg: pd.DataFrame) -> None:
     log.info("Validando event_stats ...")
     assert "match_id" in agg.columns and "team_id" in agg.columns
@@ -244,6 +308,17 @@ def main(output_path: str | None = None) -> None:
     # Merge leading_pct into main aggregate
     agg = agg.merge(gs, on=["match_id", "team_id"], how="left")
     agg["leading_pct"] = agg["leading_pct"].fillna(0.0).astype("float32")
+
+    # Merge throw_ins features (B1, B5)
+    ti_agg = load_throw_ins()
+    if not ti_agg.empty:
+        agg = agg.merge(ti_agg, on=["match_id", "team_id"], how="left")
+        for col in ("throw_in_def_zone_pct", "throw_in_att_zone_pct", "throw_in_retention3_pct"):
+            agg[col] = agg[col].fillna(agg[col].median()).astype("float32")
+    else:
+        log.warning("throw_ins no disponibles — rellenando con 0.0")
+        for col in ("throw_in_def_zone_pct", "throw_in_att_zone_pct", "throw_in_retention3_pct"):
+            agg[col] = np.float32(0.0)
 
     agg = agg[["match_id", "team_id"] + EVENT_COLS]
     validate(agg)

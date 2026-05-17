@@ -3,253 +3,253 @@
     "131": {
       "0": {
         "n": 14,
-        "raw_bias": -2.5509,
-        "shrunk_bias": -1.8796
+        "raw_bias": -2.452,
+        "shrunk_bias": -1.8068
       },
       "1": {
         "n": 15,
-        "raw_bias": 0.7192,
-        "shrunk_bias": 0.5394
+        "raw_bias": 0.7131,
+        "shrunk_bias": 0.5349
       }
     },
     "2783": {
       "0": {
         "n": 14,
-        "raw_bias": -1.7134,
-        "shrunk_bias": -1.2625
+        "raw_bias": -1.7143,
+        "shrunk_bias": -1.2632
       },
       "1": {
         "n": 15,
-        "raw_bias": -1.8749,
-        "shrunk_bias": -1.4062
+        "raw_bias": -1.7297,
+        "shrunk_bias": -1.2973
       }
     },
     "51": {
       "0": {
         "n": 14,
-        "raw_bias": -0.4941,
-        "shrunk_bias": -0.364
+        "raw_bias": -0.5045,
+        "shrunk_bias": -0.3718
       },
       "1": {
         "n": 16,
-        "raw_bias": -0.4195,
-        "shrunk_bias": -0.3196
+        "raw_bias": -0.2809,
+        "shrunk_bias": -0.214
       }
     },
     "52": {
       "0": {
         "n": 14,
-        "raw_bias": -1.3953,
-        "shrunk_bias": -1.0281
+        "raw_bias": -1.2318,
+        "shrunk_bias": -0.9076
       },
       "1": {
         "n": 15,
-        "raw_bias": -0.887,
-        "shrunk_bias": -0.6652
+        "raw_bias": -0.9613,
+        "shrunk_bias": -0.721
       }
     },
     "53": {
       "0": {
         "n": 13,
-        "raw_bias": 3.3583,
-        "shrunk_bias": 2.4254
+        "raw_bias": 3.117,
+        "shrunk_bias": 2.2512
       },
       "1": {
         "n": 15,
-        "raw_bias": 0.4214,
-        "shrunk_bias": 0.3161
+        "raw_bias": 0.5371,
+        "shrunk_bias": 0.4029
       }
     },
     "54": {
       "0": {
         "n": 15,
-        "raw_bias": -1.1792,
-        "shrunk_bias": -0.8844
+        "raw_bias": -0.8738,
+        "shrunk_bias": -0.6554
       },
       "1": {
         "n": 14,
-        "raw_bias": -2.4251,
-        "shrunk_bias": -1.7869
+        "raw_bias": -2.1113,
+        "shrunk_bias": -1.5557
       }
     },
     "55": {
       "0": {
         "n": 14,
-        "raw_bias": 0.9516,
-        "shrunk_bias": 0.7012
+        "raw_bias": 0.686,
+        "shrunk_bias": 0.5055
       },
       "1": {
         "n": 15,
-        "raw_bias": 0.5148,
-        "shrunk_bias": 0.3861
+        "raw_bias": 0.2806,
+        "shrunk_bias": 0.2104
       }
     },
     "60": {
       "0": {
         "n": 16,
-        "raw_bias": -2.0918,
-        "shrunk_bias": -1.5937
+        "raw_bias": -2.0286,
+        "shrunk_bias": -1.5456
       },
       "1": {
         "n": 14,
-        "raw_bias": 0.7456,
-        "shrunk_bias": 0.5494
+        "raw_bias": 0.8725,
+        "shrunk_bias": 0.6429
       }
     },
     "61": {
       "0": {
         "n": 15,
-        "raw_bias": 0.0435,
-        "shrunk_bias": 0.0326
+        "raw_bias": 0.0113,
+        "shrunk_bias": 0.0085
       },
       "1": {
         "n": 13,
-        "raw_bias": -0.3981,
-        "shrunk_bias": -0.2875
+        "raw_bias": -0.2488,
+        "shrunk_bias": -0.1797
       }
     },
     "62": {
       "0": {
         "n": 14,
-        "raw_bias": -1.4924,
-        "shrunk_bias": -1.0996
+        "raw_bias": -1.3777,
+        "shrunk_bias": -1.0151
       },
       "1": {
         "n": 15,
-        "raw_bias": 0.8284,
-        "shrunk_bias": 0.6213
+        "raw_bias": 1.1737,
+        "shrunk_bias": 0.8803
       }
     },
     "63": {
       "0": {
         "n": 15,
-        "raw_bias": -0.3523,
-        "shrunk_bias": -0.2642
+        "raw_bias": 0.0139,
+        "shrunk_bias": 0.0104
       },
       "1": {
         "n": 14,
-        "raw_bias": 1.6574,
-        "shrunk_bias": 1.2212
+        "raw_bias": 1.7387,
+        "shrunk_bias": 1.2812
       }
     },
     "64": {
       "0": {
         "n": 14,
-        "raw_bias": 0.9593,
-        "shrunk_bias": 0.7068
+        "raw_bias": 0.7012,
+        "shrunk_bias": 0.5167
       },
       "1": {
         "n": 15,
-        "raw_bias": 0.4171,
-        "shrunk_bias": 0.3128
+        "raw_bias": 0.9291,
+        "shrunk_bias": 0.6968
       }
     },
     "65": {
       "0": {
         "n": 14,
-        "raw_bias": -1.3366,
-        "shrunk_bias": -0.9849
+        "raw_bias": -1.3899,
+        "shrunk_bias": -1.0241
       },
       "1": {
         "n": 15,
-        "raw_bias": 0.3852,
-        "shrunk_bias": 0.2889
+        "raw_bias": 0.1878,
+        "shrunk_bias": 0.1408
       }
     },
     "67": {
       "0": {
         "n": 15,
-        "raw_bias": 0.5521,
-        "shrunk_bias": 0.4141
+        "raw_bias": 0.4443,
+        "shrunk_bias": 0.3332
       },
       "1": {
         "n": 16,
-        "raw_bias": 0.0052,
-        "shrunk_bias": 0.0039
+        "raw_bias": 0.5179,
+        "shrunk_bias": 0.3946
       }
     },
     "68": {
       "0": {
         "n": 14,
-        "raw_bias": 0.7975,
-        "shrunk_bias": 0.5876
+        "raw_bias": 0.8131,
+        "shrunk_bias": 0.5991
       },
       "1": {
         "n": 15,
-        "raw_bias": -0.668,
-        "shrunk_bias": -0.501
+        "raw_bias": -0.609,
+        "shrunk_bias": -0.4568
       }
     },
     "70": {
       "0": {
         "n": 15,
-        "raw_bias": 0.0141,
-        "shrunk_bias": 0.0106
+        "raw_bias": -0.1781,
+        "shrunk_bias": -0.1336
       },
       "1": {
         "n": 15,
-        "raw_bias": 1.126,
-        "shrunk_bias": 0.8445
+        "raw_bias": 0.7148,
+        "shrunk_bias": 0.5361
       }
     },
     "819": {
       "0": {
         "n": 16,
-        "raw_bias": 2.4543,
-        "shrunk_bias": 1.8699
+        "raw_bias": 2.7242,
+        "shrunk_bias": 2.0756
       },
       "1": {
         "n": 13,
-        "raw_bias": 1.9842,
-        "shrunk_bias": 1.433
+        "raw_bias": 1.3968,
+        "shrunk_bias": 1.0088
       }
     },
     "832": {
       "0": {
         "n": 15,
-        "raw_bias": -1.058,
-        "shrunk_bias": -0.7935
+        "raw_bias": -0.9812,
+        "shrunk_bias": -0.7359
       },
       "1": {
         "n": 14,
-        "raw_bias": -0.1596,
-        "shrunk_bias": -0.1176
+        "raw_bias": -0.3857,
+        "shrunk_bias": -0.2842
       }
     },
     "833": {
       "0": {
         "n": 15,
-        "raw_bias": 0.4497,
-        "shrunk_bias": 0.3373
+        "raw_bias": 0.3822,
+        "shrunk_bias": 0.2866
       },
       "1": {
         "n": 15,
-        "raw_bias": -1.701,
-        "shrunk_bias": -1.2757
+        "raw_bias": -1.9393,
+        "shrunk_bias": -1.4545
       }
     },
     "839": {
       "0": {
         "n": 16,
-        "raw_bias": 0.8357,
-        "shrunk_bias": 0.6367
+        "raw_bias": 0.7802,
+        "shrunk_bias": 0.5944
       },
       "1": {
         "n": 13,
-        "raw_bias": 0.3292,
-        "shrunk_bias": 0.2378
+        "raw_bias": 0.1222,
+        "shrunk_bias": 0.0882
       }
     }
   },
   "description": "Sesgo post-hoc por (team_id, is_home) con shrinkage bayesiano — regenerado desde model/train.py (prior normal-normal, k=5.00, mu=0.00)",
-  "generated_at": "2026-04-22T11:55:31.982698+00:00",
+  "generated_at": "2026-05-17T02:22:36.207687+00:00",
   "model_train_seasons": [
     "2021/2022",
     "2022/2023",
     "2023/2024",
     "2024/2025"
   ],
-  "model_trained_at": "2026-04-22T11:55:31",
+  "model_trained_at": "2026-05-17T02:22:36",
   "prior_mu": 0.0,
   "shrinkage_k": 5.0
 }
